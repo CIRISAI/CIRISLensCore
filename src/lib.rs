@@ -1,0 +1,78 @@
+//! `ciris-lens-core` — science-layer runtime for the CIRIS federation.
+//!
+//! Routes traces to cohorts, scores conformity to the alignment
+//! manifold, signs detection events. Folds into the agent post-PoB
+//! §3.1 (becomes a library every CIRIS peer links rather than a
+//! service the federation depends on).
+//!
+//! # Per-trace lifecycle
+//!
+//! ```text
+//! Edge (verified bytes arrive) ──► LensCore::process(trace)
+//!                                       │
+//!                                       ├── pipeline::lifecycle
+//!                                       │       │
+//!                                       │       ├── scrub      (PII pipeline; per trace_level)
+//!                                       │       ├── extract    (cohort + detector input features)
+//!                                       │       ├── cohort     (declared + inferred routing)
+//!                                       │       ├── detector   (5 ratchet detectors + manifold)
+//!                                       │       ├── scoring    (capacity, N_eff, conformity)
+//!                                       │       └── signing    (via persist.steward_sign)
+//!                                       │
+//!                                       └─► Persist (signed event lands in audit chain)
+//! ```
+//!
+//! # Mission alignment
+//!
+//! See `MISSION.md` at the repo root for M-1 alignment per module.
+//! Brief summary:
+//!
+//! - **scrub**: strip PII per trace_level while preserving provenance
+//! - **cohort**: route declared + inferred; mismatch is detection (LC-AV-2 P0)
+//! - **detector**: layered defense across 5 ratchet detectors + manifold
+//! - **scoring**: ManifoldConformity enum (Numeric/Indeterminate/Unavailable);
+//!   never silently elevated (LC-AV-18 P0; LC-AV-11 P0)
+//! - **signing**: every detection event is federation evidence
+//!
+//! # Threat model
+//!
+//! 21 LC-AVs in `docs/THREAT_MODEL.md`. P0 must-have-at-v0.1.0:
+//!
+//! - LC-AV-2: declared-vs-inferred cohort mismatch detection
+//! - LC-AV-11: bounded queue; `score_unavailable` on SLO breach
+//! - LC-AV-18: insufficient sample → `indeterminate`, not numeric
+//!
+//! # Boundaries
+//!
+//! - **Verify is implicit.** Edge owns verify-via-persist before any
+//!   byte reaches lens-core. Lens-core does NOT re-verify; it consumes
+//!   `VerifiedTrace` from edge and trusts the type-system attestation.
+//! - **Storage is implicit.** Persist owns trace_events + trace_llm_calls.
+//!   Lens-core holds an `Engine` handle, calls `engine.steward_sign` for
+//!   detection events, never opens its own DB connection.
+//! - **Canonicalization is implicit.** `engine.canonicalize_envelope`
+//!   only — lens-core never re-implements canonicalization rules.
+//!   CIRISPersist#7 lesson holds.
+
+#![cfg_attr(not(feature = "python"), forbid(unsafe_code))]
+#![warn(clippy::all)]
+
+// Module skeleton — implementation lands when the Phase 1 work
+// kicks off. Each module's mission is documented in MISSION.md §2;
+// this file just declares the scope.
+
+pub mod pipeline;
+pub mod scrub;
+pub mod cohort;
+pub mod detector;
+pub mod scoring;
+pub mod extract;
+pub mod signing;
+pub mod observability;
+
+// Public re-exports — the API surface the host (lens-deployed-product
+// today; agent post-fold) consumes. Stable across patch versions;
+// changes require a deprecation window.
+
+pub use scoring::result::{ManifoldConformity, Score};
+pub use pipeline::lifecycle::{LensCore, Outcome};

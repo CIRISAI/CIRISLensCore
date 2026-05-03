@@ -1,0 +1,86 @@
+[package]
+name = "ciris-lens-core"
+version = "0.1.0-dev"
+edition = "2021"
+description = "Science-layer runtime for the CIRIS federation: cohort-routes, scores manifold conformity, signs detection events"
+license = "AGPL-3.0-or-later"
+authors = ["CIRIS Team"]
+repository = "https://github.com/CIRISAI/CIRISLensCore"
+
+[lib]
+name = "ciris_lens_core"
+# `rlib` for the post-fold-into-agent trajectory (agent links lens-core
+# directly as a Rust crate, no Python in the path). `cdylib` so the
+# lens-deployed-product can keep consuming via PyO3 during the cutover
+# window.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Substrate dependencies — consume Edge + Persist day-1.
+# Verify is implicit (Edge guarantees verified bytes); storage + signing
+# is implicit (Persist owns the Engine; lens-core holds a handle).
+#
+# These pin shapes are placeholders — actual versions land at v0.1.0
+# implementation kickoff, after OQ-01 (rlib vs PyO3 link) and the
+# release coordination story with persist + edge are decided.
+# ciris-persist = { version = "0.3", path = "../CIRISPersist" }
+# ciris-edge    = { version = "0.1", path = "../CIRISEdge"    }
+
+# PyO3 bridge for lens-deployed-product cutover path. Optional when
+# lens-core consumes pure-Rust (post-fold).
+pyo3 = { version = "0.20", features = ["extension-module"], optional = true }
+
+# Serde + canonicalization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Crypto (mostly used via persist; lens-core hashes content for
+# provenance preservation post-scrub)
+sha2 = "0.10"
+ed25519-dalek = { version = "2.1", features = ["std"] }
+base64 = "0.21"
+
+# PII scrubbing primitives (lifted from cirislens-core)
+regex = "1.10"
+lazy_static = "1.4"
+
+# NER backend deps — lifted with the scrubber
+ort = { version = "2.0.0-rc.10", optional = true }
+tokenizers = { version = "0.15", optional = true }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async + observability
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tracing = "0.1"
+opentelemetry = "0.21"
+
+# Error handling
+thiserror = "1.0"
+
+[dev-dependencies]
+proptest = "1.4"
+criterion = "0.5"
+
+[features]
+# Lens-deployed-product cutover path: PyO3 cdylib for the existing
+# Python lens to consume during the v0.1.0–v0.2.x window. Defaults
+# off for the post-fold-into-agent trajectory; lens-deployed-product
+# enables.
+python = ["pyo3"]
+
+# NER scrubber backend. Optional because some deployments (mobile,
+# resource-constrained) may run without the ML model bundle and rely
+# on regex-only PII scrubbing.
+ner = ["ort", "tokenizers"]
+
+default = ["ner"]
+
+[[bench]]
+name = "scrub_bench"
+harness = false
+
+[[bench]]
+name = "score_bench"
+harness = false
