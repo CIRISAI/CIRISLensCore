@@ -8,26 +8,29 @@
 //! # Per-trace lifecycle
 //!
 //! ```text
-//! Edge (verified bytes arrive) ──► LensCore::process(trace)
-//!                                       │
-//!                                       ├── pipeline::lifecycle
-//!                                       │       │
-//!                                       │       ├── scrub      (PII pipeline; per trace_level)
-//!                                       │       ├── extract    (cohort + detector input features)
-//!                                       │       ├── cohort     (declared + inferred routing)
-//!                                       │       ├── detector   (5 ratchet detectors + manifold)
-//!                                       │       ├── scoring    (capacity, N_eff, conformity)
-//!                                       │       └── signing    (via persist.steward_sign)
-//!                                       │
-//!                                       └─► Persist (signed event lands in audit chain)
+//! Edge (verified) ──► Persist (scrub + classify + extract) ──► LensCore::process
+//!                                                                    │
+//!                                                                    ├── pipeline::lifecycle
+//!                                                                    │       │
+//!                                                                    │       ├── cohort     (declared + inferred routing)
+//!                                                                    │       ├── detector   (5 ratchet detectors + manifold)
+//!                                                                    │       ├── scoring    (capacity, N_eff, conformity)
+//!                                                                    │       └── signing    (via persist.steward_sign)
+//!                                                                    │
+//!                                                                    └─► Persist (signed event lands in audit chain)
 //! ```
+//!
+//! Scrubbing + classification + feature extraction live in
+//! `ciris-persist v0.6.0+` (CIRISPersist#19). Lens-core re-exports
+//! the typed `Features` via [`extract`] for backward call-site
+//! compatibility; the actual transform runs server-side inside
+//! `Engine.receive_and_persist`.
 //!
 //! # Mission alignment
 //!
 //! See `MISSION.md` at the repo root for M-1 alignment per module.
 //! Brief summary:
 //!
-//! - **scrub**: strip PII per trace_level while preserving provenance
 //! - **cohort**: route declared + inferred; mismatch is detection (LC-AV-2 P0)
 //! - **detector**: layered defense across 5 ratchet detectors + manifold
 //! - **scoring**: ManifoldConformity enum (Numeric/Indeterminate/Unavailable);
@@ -54,6 +57,9 @@
 //!   only — lens-core never re-implements canonicalization rules.
 //!   CIRISPersist#7 lesson holds.
 
+// Unsafe is forbidden in lens-core's own code. PyO3 macro-generated
+// FFI shims legitimately require unsafe; loosen the gate when the
+// `python` feature is on. Without `python`, the crate is unsafe-free.
 #![cfg_attr(not(feature = "python"), forbid(unsafe_code))]
 #![warn(clippy::all)]
 
@@ -62,7 +68,6 @@
 // this file just declares the scope.
 
 pub mod pipeline;
-pub mod scrub;
 pub mod cohort;
 pub mod detector;
 pub mod scoring;

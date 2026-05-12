@@ -11,41 +11,6 @@ position. Resolutions move to `CLOSED` at the bottom.
 
 ---
 
-## OQ-01: Persist integration mechanism — pure-Rust rlib link or PyO3 bridge
-
-**Question:** How does `ciris-lens-core` (Rust) call into
-`ciris-persist` (Rust + PyO3) at runtime?
-
-**Options:**
-- **A — Pure-Rust rlib link.** Persist's `Cargo.toml` already declares
-  `crate-type = ["cdylib", "rlib"]`. Lens-core depends on persist as a
-  Rust crate, links the `rlib` directly. No Python in the path.
-  Cleanest for the post-fold-into-agent trajectory (agent is Rust).
-- **B — PyO3 bridge.** Lens-core is itself a PyO3 cdylib; at runtime
-  it imports `ciris_persist` Python module and gets the `Engine`
-  handle. Same pattern lens currently uses.
-- **C — Both.** Pure-Rust path for agent post-fold; PyO3 path for
-  lens-deployed-product during the cutover. Behind a Cargo feature
-  flag.
-
-**Trade-offs:**
-
-| Dimension | rlib | PyO3 | Both |
-|---|---|---|---|
-| Post-fold readiness | ✓ already correct | needs rewrite | ✓ |
-| Lens-deployed-product readiness | needs persist's rlib publish | ✓ already works | ✓ |
-| Build complexity | One target | Two | Two with feature gate |
-| FFI boundary | Rust-Rust (clean) | Rust-Python-Rust (more layers) | Both |
-
-**Starting position:** A (rlib). The fold trajectory dominates;
-lens-deployed-product can consume via PyO3 by wrapping the rlib in a
-thin lens-core-py bindings crate if needed.
-
-**Status:** OPEN — depends on whether persist publishes its rlib as a
-crates.io artifact or stays internal to its own repo.
-
----
-
 ## OQ-02: Cohort centroid storage + delivery
 
 **Question:** Where do cohort centroids (calibrated by RATCHET) live
@@ -220,7 +185,182 @@ publishes its own provenance — there's no "library exemption."
 
 ## CLOSED
 
-(Empty until questions get resolved.)
+### OQ-09 (CLOSED 2026-05-03): Extract module is static-coded, not schema-driven
+
+**Resolution:** Lift concerns #1 (step timestamps), #2 (observation
+weights), #4 (full-component blobs) from
+`patterns_from_cirislens_core/extraction/metadata.rs` into
+`src/extract/`. **Drop concern #3** (schema-driven dynamic field
+rules) entirely.
+
+**What concern #3 was:** the legacy crate read field rules from a
+`schema_cache` (`get_field_rules(schema_version, event_type) ->
+Vec<{json_path, db_column, data_type, required}>`) and applied them
+dynamically. Output type was `HashMap<String, String>` keyed by
+`db_column` — designed to populate analytics-DB columns for the
+lens-deployed-product's downstream Postgres-derived schema.
+
+**Why drop:** lens-core writes detection events, not analytics rows.
+Detector inputs are TYPED FEATURES (`Features` struct), not
+stringified DB columns. Configurable extraction was an operator-
+convenience for lens-deployed-product (add columns without re-
+deploying); lens-core is a federation-deterministic library where
+extraction logic is version-stamped per `lens_core_version` (LC-AV-19).
+Post-fold, there's no analytics schema for these rules to feed.
+
+**If configurability ever becomes load-bearing:** RATCHET ships
+extraction parameters via the OQ-03 calibration delivery channel,
+same as detector parameters. Single mechanism for "stuff RATCHET
+ships." Do not re-introduce a schema cache.
+
+---
+
+### OQ-10 (CLOSED 2026-05-03): Resourcing classification — derived analytic, not Phase 1 cohort axis
+
+**Resolution (updated 2026-05-04, RATCHET-confirmed):** Cohort cells
+at v0.1.0 are the **6-tuple** of agent-declared `deployment_profile`
+fields (CIRISAgent FSD `TRACE_WIRE_FORMAT.md` §3.2):
+
+```
+(agent_role, agent_template, deployment_domain, deployment_type,
+ deployment_region, deployment_trust_mode)
+```
+
+`deployment_resourcing` (TRACE_WIRE_FORMAT.md §3.3, lens-computed,
+4-band closed enum) is **NOT in the cohort key** — used for
+explainability/analytics, not routing.
+
+**Two false starts before this lock-in:**
+
+1. **Initial closure (5-tuple, my mistake)**: drew from
+   `deployment_profile` but dropped `agent_role` for no good reason.
+2. **Projection-v1 closure (5-tuple, RATCHET's mistake)**: included
+   `agent_role` but mis-named two fields (`dsdma_domain` instead of
+   `deployment_domain`, `agent_type` instead of `deployment_type`)
+   and missed `deployment_trust_mode` entirely.
+
+RATCHET (2026-05-04) walked the FSD §3.2 enum closures + the 2.7.9
+wire format and confirmed the cohort key is the full
+`deployment_profile` 6-tuple. Sovereign vs federated_peer agents
+have materially different behavioral manifolds — `deployment_trust_mode`
+is load-bearing for cohort separation, not optional.
+
+**`dsdma_domain` is a real field but NOT a cohort key.** RATCHET
+confirmed `DMA_RESULTS.payload.dsdma.domain` is the per-thought
+subject inferred from prompt (free-form, 247 distinct values in
+n=6,465 corpus). Could be a feature dimension someday; not in
+projection v1, not in the cohort key.
+
+**Projection v1 extraction paths against 2.7.9 wire format
+(RATCHET-confirmed 2026-05-04):** all 16 projection fields are
+reachable in 2.7.9 traffic via JOIN across event types keyed by
+`(trace_id, thought_id, attempt_index)`. Concrete paths in
+CIRISLensCore#3 (projection comment) — `DMA_RESULTS.payload.csdma.*`,
+`DMA_RESULTS.payload.dsdma.*`, `IDMA_RESULT.payload.*`,
+`CONSCIENCE_RESULT.payload.*`. Conditional-presence pattern in 2.7.9
+(50–67% present for conscience-gated fields) matches historical corpus
+null rates (33–50% null) almost exactly — calibration translates
+across wire versions.
+
+**Last-CONSCIENCE_RESULT-per-thought rule (RATCHET-confirmed):** in
+2.7.9, `CONSCIENCE_RESULT` fires multiple times per thought (initial
+pass, recursive retries, finalization). The projection extracts ONE
+conscience snapshot per thought — use the **last** `CONSCIENCE_RESULT`
+row (the FINALIZE_ACTION emission) because it represents the
+post-bounce stable state that shipped in the action. PDMA bounces
+(4× on Tiananmen-class prompts per CIRIS-RED MISSION) change the
+conscience snapshot mid-thought; final pass is the right anchor.
+Lens-core's `static_extract.rs` must implement last-wins (not
+first-wins like the legacy blob storage rule) for `CONSCIENCE_RESULT`
+component traversal when populating `CrcFeatures`.
+
+`deployment_resourcing` (`CIRISAgent/FSD/TRACE_WIRE_FORMAT.md` §3.3,
+4-band closed enum `{scarcity, constrained, standard, abundance}`)
+is **NOT a Phase 1 cohort axis**. The closed-enum value space is
+normative; the threshold partition is research-grade and not
+normative.
+
+**What lens-core does compute at v0.1.0:** continuous cost/tokens/
+model_class features in the `Features` struct. These are P0 inputs
+to LC-AV-2 (declared-vs-inferred mismatch). Detection compares the
+trace's `(cost_estimate, total_tokens, model_class)` against the
+declared-cohort's expected distribution — no categorical bucketing
+required.
+
+**What lens-core does NOT compute on the v0.1.0 hot path:** the
+4-band `ResourcingTier` projection. The classifier exists in
+`src/cohort/resourcing.rs` for downstream analytics + post-
+calibration RATCHET use, but is not called by `pipeline::lifecycle`
+or by Phase 1 cohort routing.
+
+**Why defer:** adding resourcing as a 6th cohort axis quadruples
+cohort-cell count and worsens LC-AV-18 cold-start at v0.1.0 corpus
+sizes. Of the threat-model citations, only LC-AV-3 (within-cohort
+variance preservation) genuinely needs the tier as a categorical
+axis — and LC-AV-3 is post-P0. LC-AV-2 / LC-AV-4 work on continuous
+features.
+
+**Storage:** none per-trace. Detection events that fire under
+LC-AV-2 carry `(cost_estimate, total_tokens, model_class,
+declared_cohort)` in their signed payload — that's all peers need
+to verify the routing decision. The `cirislens.trace_context.
+deployment_resourcing` column reserved in `CIRISPersist`'s V006
+migration stays reserved-not-implemented at v0.1.0; post-fold-into-
+agent it stays unimplemented since the agent doesn't run analytics
+schemas.
+
+**Future extension to 6-tuple:** if RATCHET's calibration determines
+the tier-as-cohort-axis is load-bearing, the parameters
+(`(cost_rate_table, tier_thresholds, axis_inclusion_flag)`) ride on
+the OQ-03 delivery channel alongside detector parameters. Single
+delivery mechanism.
+
+---
+
+### OQ-01 (CLOSED 2026-05-03): Persist integration — both rlib and PyO3 cdylib via Cargo feature
+
+**Resolution:** Option C — both paths, gated by the `python` Cargo
+feature already declared in `Cargo.toml`:
+
+- **rlib (default)** — pure-Rust link to `ciris-persist`. Primary
+  trajectory; what lens-core ships when consumed by agent post-fold
+  per PoB §3.1.
+- **PyO3 cdylib (`--features python`)** — what `CIRISLens` (the
+  deployed Python product) consumes during the v0.1.0 – v0.2.x cutover
+  window. Same calling convention as today's in-tree `cirislens-core`
+  PyO3 binding; drop-in target.
+
+**What unblocked closure:**
+
+- **CIRISPersist v0.4.2 (2026-05-03)** — landed `signing::StewardSigner`
+  as a Rust-public struct + prelude export, closing the only remaining
+  rlib gap (CIRISPersist#17). PyO3 `Engine.steward_sign` is now a thin
+  wrapper over the same struct, so both paths share one implementation.
+- **CIRISPersist v0.4.1 prelude** — already exposed
+  `canonicalize_envelope_for_signing`, `verify_hybrid_via_directory`,
+  `body_sha256`, `FederationDirectory`, `Backend`, `OutboundQueue`.
+  Combined with v0.4.2's signer, lens-core has every substrate
+  primitive it needs from prelude alone.
+- **CIRISEdge v0.1.0** — `VerifiedTrace` typed alias (`src/verify.rs:154`)
+  and verify-via-persist pipeline; lens-core consumes `VerifiedTrace`
+  with no re-verify obligation (AV-9 structural gate).
+
+**Distribution:** persist + edge are consumed via `git = "...", tag = "vX.Y.Z"`
+following the pattern edge already uses against persist. Crates.io
+publication is not required; the federation distributes via tagged
+git refs + PyPI for the cdylib variants.
+
+**Open coordination item (release-prep, not blocker):** edge v0.1.0
+pins persist at `tag = "v0.4.1"`. For the dep tree to unify cleanly
+when lens-core pins both, edge needs to bump its persist floor to
+v0.4.2 in a v0.1.1 patch release. During Phase 1 sketching lens-core
+uses path deps + a `[patch.*]` override; the formal git-tag pinning
+lands at lens-core v0.1.0 release prep, post-edge-v0.1.1.
+
+---
+
+(Other entries below were closed before the OQ list was written and
+don't need to be re-litigated.)
 
 The threat model (`docs/THREAT_MODEL.md`) closed these architectural
 questions before this OQ list got written, so they don't need to be
