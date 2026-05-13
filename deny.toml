@@ -1,0 +1,71 @@
+# cargo-deny config — enforces MISSION.md §6 license-locked mission
+# preservation. Inherits the dep-tree concerns persist + edge +
+# verify already curated; CIRISLensCore transitively pulls the same
+# trees through ciris-persist and ciris-edge.
+
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "Zlib",
+    "OpenSSL",
+    "AGPL-3.0",
+    "AGPL-3.0-or-later",
+    "GPL-3.0",
+    "GPL-3.0-or-later",
+    "CC0-1.0",
+    # webpki-roots 0.26+ — CDLA-Permissive-2.0 (Linux Foundation's
+    # Community Data License Agreement, permissive variant). AGPL-
+    # compatible; transitive via ciris-verify-core's reqwest/ureq
+    # stack — same finding persist + edge document.
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.85
+
+[bans]
+# Same posture as edge — duplicate transitive deps through pyo3 +
+# tokio + serde + crypto stacks. None on lens-core's science-layer
+# hot path. Dedup pass when the dep tree stabilizes.
+multiple-versions = "allow"
+wildcards         = "deny"
+
+[advisories]
+yanked = "warn"
+# Inherited ignores from CIRISPersist/CIRISEdge — same dep tree,
+# same transitive-only exposure. None of these advisories touch
+# lens-core's science-layer hot path.
+ignore = [
+    "RUSTSEC-2024-0388",  # derivative unmaintained (via ciris-keyring TPM derive stack)
+    "RUSTSEC-2024-0384",  # instant unmaintained (Phase 3 Reticulum may obsolete)
+
+    # rustls / webpki / DNS branch — transitive via ciris-verify-core's
+    # verification stack.
+    "RUSTSEC-2026-0119",  # hickory-proto DNS encoding O(n²); lens-core has no DNS encode path
+    "RUSTSEC-2025-0134",  # rustls-pemfile unmaintained
+    "RUSTSEC-2026-0098",  # rustls-webpki URI-name constraint (no URI SAN validation here)
+    "RUSTSEC-2026-0099",  # rustls-webpki wildcard-DNS constraint (no name-constraint certs)
+    "RUSTSEC-2026-0104",  # rustls-webpki CRL parse panic (no CRL parsing here)
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "warn"
+# v0.1.0 — persist + edge + verify all ship as `publish = false`
+# Rust crates pulled via git tag. Allow-list explicitly until they're
+# on crates.io (or a private registry).
+allow-git = [
+    "https://github.com/CIRISAI/CIRISPersist",
+    "https://github.com/CIRISAI/CIRISEdge",
+    "https://github.com/CIRISAI/CIRISVerify",
+]

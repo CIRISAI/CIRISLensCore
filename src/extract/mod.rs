@@ -12,8 +12,7 @@
 //! happens server-side during `Engine.receive_and_persist`.
 
 pub use ciris_persist::pipeline::extract::{
-    extract_features, DeclaredCohortAxes, Features, ModelClass, ObservationWeights,
-    StepTimestamps,
+    extract_features, DeclaredCohortAxes, Features, ModelClass, ObservationWeights, StepTimestamps,
 };
 
 pub mod projection;

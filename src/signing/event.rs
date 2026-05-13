@@ -266,18 +266,16 @@ fn severity_to_persist(s: Severity) -> DetectionSeverity {
 
 fn conformity_to_persist(c: &ManifoldConformity) -> (ConformityVariant, Value) {
     match c {
-        ManifoldConformity::Numeric(score) => (
-            ConformityVariant::Numeric,
-            json!({ "score": score }),
-        ),
+        ManifoldConformity::Numeric(score) => {
+            (ConformityVariant::Numeric, json!({ "score": score }))
+        }
         ManifoldConformity::Indeterminate { reason } => (
             ConformityVariant::Indeterminate,
             indeterminate_payload(reason),
         ),
-        ManifoldConformity::Unavailable { reason } => (
-            ConformityVariant::Unavailable,
-            unavailable_payload(reason),
-        ),
+        ManifoldConformity::Unavailable { reason } => {
+            (ConformityVariant::Unavailable, unavailable_payload(reason))
+        }
     }
 }
 
@@ -319,14 +317,19 @@ mod tests {
     #[test]
     fn severity_maps_to_persist_db_strings() {
         assert_eq!(severity_to_persist(Severity::Info).as_db_str(), "info");
-        assert_eq!(severity_to_persist(Severity::Warning).as_db_str(), "warning");
-        assert_eq!(severity_to_persist(Severity::Critical).as_db_str(), "critical");
+        assert_eq!(
+            severity_to_persist(Severity::Warning).as_db_str(),
+            "warning"
+        );
+        assert_eq!(
+            severity_to_persist(Severity::Critical).as_db_str(),
+            "critical"
+        );
     }
 
     #[test]
     fn conformity_numeric_carries_score_in_payload() {
-        let (variant, payload) =
-            conformity_to_persist(&ManifoldConformity::Numeric(2.71));
+        let (variant, payload) = conformity_to_persist(&ManifoldConformity::Numeric(2.71));
         assert_eq!(variant, ConformityVariant::Numeric);
         assert_eq!(payload["score"], 2.71);
     }

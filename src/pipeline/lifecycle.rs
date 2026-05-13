@@ -130,9 +130,7 @@ impl LensCore {
                 mahalanobis,
                 cohort_sample_count,
             },
-            DetectionResult::DeclaredInferredMismatch { .. } => {
-                AssemblyInput::AmbiguousCohort
-            }
+            DetectionResult::DeclaredInferredMismatch { .. } => AssemblyInput::AmbiguousCohort,
         };
 
         // 7. LC-AV-18 gate — produces ManifoldConformity.
@@ -210,9 +208,7 @@ fn severity_from(c: &ManifoldConformity) -> Severity {
 /// Render a compact cohort identifier for the observability `Score`.
 /// Format: `role/template/domain/type/region/trust_mode`, with `?`
 /// for absent axes. Not federation-stable; for logs only.
-fn format_cohort_id(
-    declared: &ciris_persist::pipeline::extract::DeclaredCohortAxes,
-) -> String {
+fn format_cohort_id(declared: &ciris_persist::pipeline::extract::DeclaredCohortAxes) -> String {
     let q = |o: &Option<String>| o.as_deref().unwrap_or("?").to_string();
     format!(
         "{}/{}/{}/{}/{}/{}",

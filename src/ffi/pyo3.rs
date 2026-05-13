@@ -181,7 +181,12 @@ fn process_trace_batch(
     trace_level: String,
     correlation_metadata: Option<String>,
 ) -> PyResult<PyObject> {
-    let _ = (batch_timestamp, consent_timestamp, trace_level, correlation_metadata);
+    let _ = (
+        batch_timestamp,
+        consent_timestamp,
+        trace_level,
+        correlation_metadata,
+    );
 
     let batch_id = Uuid::new_v4().to_string();
     let signing_key_id: String = engine
@@ -359,9 +364,8 @@ fn scrub_traces_batch<'py>(
 ) -> PyResult<&'py PyList> {
     let mut values = Vec::with_capacity(traces_json.len());
     for (i, s) in traces_json.iter().enumerate() {
-        let v: serde_json::Value = serde_json::from_str(s).map_err(|e| {
-            PyValueError::new_err(format!("invalid trace JSON at index {i}: {e}"))
-        })?;
+        let v: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| PyValueError::new_err(format!("invalid trace JSON at index {i}: {e}")))?;
         values.push(v);
     }
     let parsed_level = parse_level(level)?;
@@ -392,6 +396,9 @@ fn ciris_lens_core(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scrub_trace, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_traces_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ner_is_configured, m)?)?;
-    m.add("PROJECTION_VERSION", crate::extract::projection::PROJECTION_VERSION)?;
+    m.add(
+        "PROJECTION_VERSION",
+        crate::extract::projection::PROJECTION_VERSION,
+    )?;
     Ok(())
 }

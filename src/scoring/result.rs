@@ -56,7 +56,10 @@ pub enum IndeterminateReason {
 #[derive(Debug, Clone)]
 pub enum UnavailableReason {
     /// LC-AV-11 SLO breach. Bounded queue dropped this trace's score.
-    SloBreach { budget: Duration, observed: Duration },
+    SloBreach {
+        budget: Duration,
+        observed: Duration,
+    },
     /// Persist read failed; cohort centroid lookup unavailable.
     PersistReadFailure,
     /// Detector implementation panicked. Marked with

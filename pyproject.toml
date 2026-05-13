@@ -1,0 +1,59 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "ciris-lens-core"
+description = "Science-layer runtime for the CIRIS federation: cohort routing, manifold-conformity scoring, signed detection events"
+readme = "README.md"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "CIRIS AI", email = "hello@ciris.ai" }]
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+# v0.1.0 — pip-install-time subsumption mirroring edge's pattern.
+# `pip install ciris-lens-core` pulls `ciris-persist` (which
+# transitively pulls `ciris-verify` and the build-sign / build-verify
+# console scripts). Deployed lens + agent get one install command for
+# the whole lens+persist+verify stack.
+#
+# Pin to >=0.7.4 because that's the post-ingest filter pipeline
+# substrate cut (CIRISPersist#19): scrub + classify + extract wired
+# into Engine.receive_and_persist + the v0.7.4 closure of the
+# orchestration gap. Lens-core's PyO3 surface delegates scrub_trace
+# / scrub_traces_batch / ner_is_configured to persist's
+# pipeline::scrub free functions, and process_trace_batch routes
+# signing + persistence through the caller-provided persist.Engine
+# (CIRISPersist#17 StewardSigner + #18 DetectionEvent put paths).
+#
+# Pin to <1 because we expect persist to follow semver-major on
+# breaking changes; v0.1.x lens-core consumes v0.x persist. Bump
+# upper bound when v0.2.x lens-core coordinates with v1.x persist.
+dependencies = [
+    "ciris-persist>=0.7.4,<1",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://ciris.ai"
+Repository = "https://github.com/CIRISAI/CIRISLensCore"
+Issues = "https://github.com/CIRISAI/CIRISLensCore/issues"
+
+[tool.maturin]
+features = ["python"]
+module-name = "ciris_lens_core"
+# abi3-py311 — one wheel covers Python 3.11+ per the same matrix
+# precedent persist + edge + verify use. CIRISLensCore ships three
+# platform wheels: linux-x86_64, linux-aarch64, darwin-aarch64
+# (darwin-x86_64 omitted per GitHub Actions Intel macOS runner
+# capacity issues — matches persist/edge exactly).
+python-source = "python"
+strip = true

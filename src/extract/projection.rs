@@ -90,7 +90,9 @@ pub fn project(features: &Features) -> [f64; PROJECTION_DIM] {
 }
 
 fn f64_at(blob: Option<&Value>, path: &[&str]) -> f64 {
-    descend(blob, path).and_then(Value::as_f64).unwrap_or(f64::NAN)
+    descend(blob, path)
+        .and_then(Value::as_f64)
+        .unwrap_or(f64::NAN)
 }
 
 fn bool_at(blob: Option<&Value>, path: &[&str]) -> f64 {

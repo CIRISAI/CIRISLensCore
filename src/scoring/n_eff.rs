@@ -122,7 +122,10 @@ mod tests {
                     n_eff <= n as f64 + EPS,
                     "kish_n_eff({n}, {rho}) = {n_eff} exceeded N"
                 );
-                assert!(n_eff >= 1.0 - EPS, "kish_n_eff({n}, {rho}) = {n_eff} below 1.0");
+                assert!(
+                    n_eff >= 1.0 - EPS,
+                    "kish_n_eff({n}, {rho}) = {n_eff} below 1.0"
+                );
             }
         }
     }

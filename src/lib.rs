@@ -67,18 +67,18 @@
 // kicks off. Each module's mission is documented in MISSION.md §2;
 // this file just declares the scope.
 
-pub mod pipeline;
 pub mod cohort;
 pub mod detector;
-pub mod scoring;
 pub mod extract;
-pub mod signing;
-pub mod observability;
 pub mod ffi;
+pub mod observability;
+pub mod pipeline;
+pub mod scoring;
+pub mod signing;
 
 // Public re-exports — the API surface the host (lens-deployed-product
 // today; agent post-fold) consumes. Stable across patch versions;
 // changes require a deprecation window.
 
-pub use scoring::result::{ManifoldConformity, Score};
 pub use pipeline::lifecycle::{LensCore, Outcome};
+pub use scoring::result::{ManifoldConformity, Score};
