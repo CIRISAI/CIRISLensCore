@@ -21,4 +21,4 @@
 pub mod declared;
 pub mod resourcing;
 
-pub use declared::{cohort_cell, is_complete, missing_axes};
+pub use declared::{cohort_cell, is_complete, missing_axes, parse_from_envelope};

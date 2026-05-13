@@ -40,6 +40,34 @@
 use ciris_persist::pipeline::extract::DeclaredCohortAxes;
 use serde_json::{json, Value};
 
+/// Pull the agent-declared 6-tuple out of a trace envelope's body.
+/// The wire format places these fields under
+/// `deployment_profile.{agent_role, agent_template, ...}` per
+/// CIRISAgent FSD §3.2.
+///
+/// Absent fields land as `None` rather than erroring — wire spec
+/// §3.2 makes them required at 2.7.9 but pre-2.7.9 traces and
+/// development-mode emissions may omit some; the orchestrator
+/// routes incomplete-declared traces through
+/// [`crate::scoring::AssemblyInput::AmbiguousCohort`].
+pub fn parse_from_envelope(body: &Value) -> DeclaredCohortAxes {
+    let profile = body.get("deployment_profile");
+    let s = |field: &str| -> Option<String> {
+        profile
+            .and_then(|p| p.get(field))
+            .and_then(Value::as_str)
+            .map(String::from)
+    };
+    DeclaredCohortAxes {
+        agent_role: s("agent_role"),
+        agent_template: s("agent_template"),
+        deployment_domain: s("deployment_domain"),
+        deployment_type: s("deployment_type"),
+        deployment_region: s("deployment_region"),
+        deployment_trust_mode: s("deployment_trust_mode"),
+    }
+}
+
 /// Build the cohort_cell JSON object from a declared 6-tuple. Absent
 /// fields render as JSON `null` rather than being omitted, preserving
 /// the 6-key shape.
