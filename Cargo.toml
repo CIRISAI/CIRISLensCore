@@ -45,6 +45,12 @@ base64 = "0.21"
 # Date/time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Detection-event identifier + envelope encoding. Transitive via
+# persist; declared here so lens-core can construct + hex-encode
+# directly in `src/signing/event.rs`.
+uuid = { version = "1", features = ["v4", "serde"] }
+hex  = "0.4"
+
 # Async + observability
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
