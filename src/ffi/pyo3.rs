@@ -62,16 +62,12 @@ fn parse_level(level: &str) -> PyResult<TraceLevel> {
     }
 }
 
-/// Serialize a `serde_json::Value` to a Python object via `json.loads`.
-fn pythonize(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
-    let s = serde_json::to_string(value)
-        .map_err(|e| PyRuntimeError::new_err(format!("serialize trace: {e}")))?;
-    let json_mod = py.import("json")?;
-    json_mod.call_method1("loads", (s,)).map(Into::into)
-}
-
 /// Convert persist's `ScrubStats` into a Python dict carrying the
-/// per-trace telemetry the deployed lens aggregates.
+/// per-trace telemetry the deployed lens aggregates. Mirrors
+/// **legacy `cirislens-core` exactly** — 7 fields including
+/// `ner_cache_misses` — so callers that read specific fields by
+/// name don't break across the swap. Drift here was caught at
+/// v0.1.0 review against `CIRISLens/api/scrubber_v2.py`.
 fn stats_to_dict<'py>(py: Python<'py>, stats: &ScrubStats) -> PyResult<&'py PyDict> {
     let dict = PyDict::new(py);
     dict.set_item("entities_redacted", stats.entities_redacted)?;
@@ -80,18 +76,28 @@ fn stats_to_dict<'py>(py: Python<'py>, stats: &ScrubStats) -> PyResult<&'py PyDi
     dict.set_item("walker_max_depth", stats.walker_max_depth)?;
     dict.set_item("ner_ran", stats.ner_ran)?;
     dict.set_item("ner_cache_hits", stats.ner_cache_hits)?;
+    dict.set_item("ner_cache_misses", stats.ner_cache_misses)?;
     Ok(dict)
 }
 
-/// Convert one `ScrubbedTrace` into the
-/// `{"trace": <object>, "level": <str>, "stats": <dict>}` shape.
+/// Convert one `ScrubbedTrace` into the legacy dict shape
+/// `{"trace": "<json string>", "level": <str>, "stats": <dict>}`.
+///
+/// **`trace` is emitted as a JSON STRING**, not a pre-parsed
+/// Python object. Matches legacy `cirislens-core::scrub_trace`
+/// exactly — `CIRISLens/api/scrubber_v2.py:195` does
+/// `json.loads(result["trace"])` and would error on a pre-parsed
+/// dict. Drift here was caught at v0.1.0 review and is exactly
+/// the kind of "matched legacy precisely" the swap requires.
 fn scrubbed_to_dict<'py>(
     py: Python<'py>,
     scrubbed: ScrubbedTrace,
     level_str: &str,
 ) -> PyResult<&'py PyDict> {
+    let trace_json = serde_json::to_string(&scrubbed.value)
+        .map_err(|e| PyRuntimeError::new_err(format!("serialize scrubbed trace: {e}")))?;
     let dict = PyDict::new(py);
-    dict.set_item("trace", pythonize(py, &scrubbed.value)?)?;
+    dict.set_item("trace", trace_json)?;
     dict.set_item("level", level_str)?;
     dict.set_item("stats", stats_to_dict(py, &scrubbed.stats)?)?;
     Ok(dict)
