@@ -74,6 +74,7 @@ pub mod scoring;
 pub mod extract;
 pub mod signing;
 pub mod observability;
+pub mod ffi;
 
 // Public re-exports — the API surface the host (lens-deployed-product
 // today; agent post-fold) consumes. Stable across patch versions;
