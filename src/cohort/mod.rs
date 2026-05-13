@@ -18,4 +18,7 @@
 //! tier is a research-grade analytic available via [`resourcing`]
 //! for post-calibration use. See `OPEN_QUESTIONS.md` OQ-10 closure.
 
+pub mod declared;
 pub mod resourcing;
+
+pub use declared::{cohort_cell, is_complete, missing_axes};
