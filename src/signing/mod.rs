@@ -3,4 +3,7 @@
 
 pub mod event;
 
-pub use event::{sign_detection, DetectionInputs, SigningError};
+pub use event::{
+    assemble_event, prepare_detection, sign_detection, DetectionInputs, PreparedDetection,
+    SigningError,
+};

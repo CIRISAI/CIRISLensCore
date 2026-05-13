@@ -34,7 +34,7 @@
 //! `ciris_crypto::HybridSignature` struct (which would force a
 //! direct dep on `ciris_crypto`).
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -104,18 +104,41 @@ pub struct DetectionInputs<'a> {
     pub ratchet_calibration_version: i32,
 }
 
-/// Build a [`DetectionEvent`] from `inputs`, canonicalize the
-/// signed envelope, hybrid-sign with `signer`, return the
-/// ready-to-persist row alongside a lens-core summary for the
-/// caller's `Score`.
-///
-/// Async because [`StewardSigner::sign_ml_dsa_65`] is async (the
-/// underlying `PqcSigner` trait is async-ready for hardware-key
-/// backends).
-pub async fn sign_detection(
-    signer: &StewardSigner,
-    inputs: DetectionInputs<'_>,
-) -> Result<(DetectionEvent, Summary), SigningError> {
+/// Pre-signing state — the canonicalized envelope, the bytes that
+/// need signing, and the typed-converter outputs cached for
+/// downstream assembly. Returned by [`prepare_detection`] for both
+/// rlib and PyO3 paths; the difference is who calls `sign_*` next.
+pub struct PreparedDetection {
+    /// UUID v4 generated for this detection event.
+    pub detection_id: Uuid,
+    /// Wall-clock at preparation time. Recorded in both the canonical
+    /// envelope (in case verifiers want to bound) and the eventual
+    /// row's `ts` column.
+    pub ts: DateTime<Utc>,
+    /// Canonical-JSON bytes the caller signs. Sent to the steward
+    /// signer (Ed25519 + ML-DSA-65 hybrid) by either path.
+    pub canonical_bytes: Vec<u8>,
+    /// Pre-mapped persist severity enum (`info` / `warning` / `critical`).
+    pub severity_persist: DetectionSeverity,
+    /// Pre-mapped conformity discriminant (`numeric` / `indeterminate`
+    /// / `unavailable`).
+    pub conformity_variant: ConformityVariant,
+    /// Variant-specific payload (score / indeterminate-reason /
+    /// unavailable-reason). Already JSON-encoded.
+    pub conformity_payload: Value,
+    /// Cohort cell JSON, unchanged from inputs.
+    pub cohort_cell: Value,
+}
+
+/// Build the canonical envelope + canonical bytes from inputs. Pure
+/// function. Used by both `sign_detection` (rlib path, signer
+/// invokes itself) and the PyO3 `process_trace_batch` (engine
+/// invokes the signer via `Engine.steward_sign` /
+/// `Engine.steward_pqc_sign`).
+pub fn prepare_detection(
+    inputs: &DetectionInputs<'_>,
+    signing_key_id: &str,
+) -> Result<PreparedDetection, SigningError> {
     let detection_id = Uuid::new_v4();
     let ts = Utc::now();
     let severity_persist = severity_to_persist(inputs.severity);
@@ -132,14 +155,34 @@ pub async fn sign_detection(
         "conformity_payload":          payload,
         "lens_core_version":           inputs.lens_core_version,
         "ratchet_calibration_version": inputs.ratchet_calibration_version,
-        "signing_key_id":              signer.key_id(),
+        "signing_key_id":              signing_key_id,
         "ts":                          ts.to_rfc3339(),
     });
 
     let canonical_bytes = canonicalize_envelope_for_signing(&envelope)
         .map_err(|e| SigningError::Canonicalize(format!("{e}")))?;
 
-    let ed25519_sig = signer.sign_ed25519(&canonical_bytes)?;
+    Ok(PreparedDetection {
+        detection_id,
+        ts,
+        canonical_bytes,
+        severity_persist,
+        conformity_variant: variant,
+        conformity_payload: payload,
+        cohort_cell: envelope["cohort_cell"].clone(),
+    })
+}
+
+/// Assemble the final [`DetectionEvent`] from prepared state + the
+/// hybrid signature pair. Validates signature byte lengths. Both
+/// paths converge here.
+pub fn assemble_event(
+    inputs: &DetectionInputs<'_>,
+    prepared: PreparedDetection,
+    ed25519_sig: Vec<u8>,
+    ml_dsa_65_sig: Vec<u8>,
+    signing_key_id: String,
+) -> Result<(DetectionEvent, Summary), SigningError> {
     if ed25519_sig.len() != 64 {
         return Err(SigningError::SignatureShape {
             field: "ed25519_sig",
@@ -147,11 +190,6 @@ pub async fn sign_detection(
             expected: 64,
         });
     }
-
-    let mut bound = Vec::with_capacity(canonical_bytes.len() + 64);
-    bound.extend_from_slice(&canonical_bytes);
-    bound.extend_from_slice(&ed25519_sig);
-    let ml_dsa_65_sig = signer.sign_ml_dsa_65(&bound).await?;
     if ml_dsa_65_sig.len() != 3309 {
         return Err(SigningError::SignatureShape {
             field: "ml_dsa_65_sig",
@@ -160,25 +198,24 @@ pub async fn sign_detection(
         });
     }
 
-    let event_hash = hex::encode(Sha256::digest(&canonical_bytes));
+    let event_hash = hex::encode(Sha256::digest(&prepared.canonical_bytes));
 
-    let cohort_cell = envelope["cohort_cell"].clone();
     let event = DetectionEvent {
-        detection_id,
-        trace_id: inputs.trace_id,
-        body_sha256: inputs.body_sha256,
+        detection_id: prepared.detection_id,
+        trace_id: inputs.trace_id.clone(),
+        body_sha256: inputs.body_sha256.clone(),
         detector: inputs.detector.to_string(),
-        severity: severity_persist,
-        cohort_cell,
-        conformity_variant: variant,
-        conformity_payload: payload,
+        severity: prepared.severity_persist,
+        cohort_cell: prepared.cohort_cell,
+        conformity_variant: prepared.conformity_variant,
+        conformity_payload: prepared.conformity_payload,
         lens_core_version: inputs.lens_core_version.to_string(),
         ratchet_calibration_version: inputs.ratchet_calibration_version,
-        canonical_bytes,
-        ed25519_sig: ed25519_sig.to_vec(),
+        canonical_bytes: prepared.canonical_bytes,
+        ed25519_sig,
         ml_dsa_65_sig,
-        signing_key_id: signer.key_id().to_string(),
-        ts,
+        signing_key_id,
+        ts: prepared.ts,
     };
 
     let summary = Summary {
@@ -188,6 +225,35 @@ pub async fn sign_detection(
     };
 
     Ok((event, summary))
+}
+
+/// Build a [`DetectionEvent`] from `inputs`, canonicalize the signed
+/// envelope, hybrid-sign with `signer`, return the ready-to-persist
+/// row alongside a lens-core summary. RLib path; the PyO3 path
+/// composes [`prepare_detection`] + `Engine.steward_sign` / `_pqc_sign`
+/// + [`assemble_event`] directly.
+///
+/// Async because [`StewardSigner::sign_ml_dsa_65`] is async.
+pub async fn sign_detection(
+    signer: &StewardSigner,
+    inputs: DetectionInputs<'_>,
+) -> Result<(DetectionEvent, Summary), SigningError> {
+    let prepared = prepare_detection(&inputs, signer.key_id())?;
+
+    let ed25519_sig = signer.sign_ed25519(&prepared.canonical_bytes)?;
+    let mut bound = Vec::with_capacity(prepared.canonical_bytes.len() + 64);
+    bound.extend_from_slice(&prepared.canonical_bytes);
+    bound.extend_from_slice(&ed25519_sig);
+    let ml_dsa_65_sig = signer.sign_ml_dsa_65(&bound).await?;
+
+    let signing_key_id = signer.key_id().to_string();
+    assemble_event(
+        &inputs,
+        prepared,
+        ed25519_sig.to_vec(),
+        ml_dsa_65_sig,
+        signing_key_id,
+    )
 }
 
 fn severity_to_persist(s: Severity) -> DetectionSeverity {
