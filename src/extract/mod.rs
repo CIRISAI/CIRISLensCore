@@ -15,3 +15,7 @@ pub use ciris_persist::pipeline::extract::{
     extract_features, DeclaredCohortAxes, Features, ModelClass, ObservationWeights,
     StepTimestamps,
 };
+
+pub mod projection;
+
+pub use projection::{project, PROJECTION_DIM, PROJECTION_VERSION};
