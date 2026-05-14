@@ -68,7 +68,7 @@ fn parse_level(level: &str) -> PyResult<TraceLevel> {
 /// `ner_cache_misses` — so callers that read specific fields by
 /// name don't break across the swap. Drift here was caught at
 /// v0.1.0 review against `CIRISLens/api/scrubber_v2.py`.
-fn stats_to_dict<'py>(py: Python<'py>, stats: &ScrubStats) -> PyResult<&'py PyDict> {
+fn stats_to_dict<'py>(py: Python<'py>, stats: &ScrubStats) -> PyResult<Bound<'py, PyDict>> {
     let dict = PyDict::new(py);
     dict.set_item("entities_redacted", stats.entities_redacted)?;
     dict.set_item("regex_redactions", stats.regex_redactions)?;
@@ -93,7 +93,7 @@ fn scrubbed_to_dict<'py>(
     py: Python<'py>,
     scrubbed: ScrubbedTrace,
     level_str: &str,
-) -> PyResult<&'py PyDict> {
+) -> PyResult<Bound<'py, PyDict>> {
     let trace_json = serde_json::to_string(&scrubbed.value)
         .map_err(|e| PyRuntimeError::new_err(format!("serialize scrubbed trace: {e}")))?;
     let dict = PyDict::new(py);
@@ -149,7 +149,7 @@ fn severity_str(s: Severity) -> &'static str {
 /// {
 ///     "batch_id":         "<uuid>",
 ///     "traces_received":  100,
-///     "traces_processed": 98,     # successful pipeline + put count
+///     "traces_processed": 98,
 ///     "detections": [
 ///         {
 ///             "detection_id": "<uuid>",
@@ -172,15 +172,15 @@ fn severity_str(s: Severity) -> &'static str {
 /// implementations.
 #[pyfunction]
 #[pyo3(signature = (engine, events, batch_timestamp, consent_timestamp=None, trace_level="detailed".to_string(), correlation_metadata=None))]
-fn process_trace_batch(
-    py: Python<'_>,
-    engine: &PyAny,
+fn process_trace_batch<'py>(
+    py: Python<'py>,
+    engine: &Bound<'py, PyAny>,
     events: Vec<String>,
     batch_timestamp: String,
     consent_timestamp: Option<String>,
     trace_level: String,
     correlation_metadata: Option<String>,
-) -> PyResult<PyObject> {
+) -> PyResult<Bound<'py, PyDict>> {
     let _ = (
         batch_timestamp,
         consent_timestamp,
@@ -194,7 +194,7 @@ fn process_trace_batch(
         .map_err(|e| PyRuntimeError::new_err(format!("engine.steward_key_id(): {e}")))?
         .extract()?;
 
-    let detections: &PyList = PyList::empty(py);
+    let detections = PyList::empty(py);
     let mut traces_processed: usize = 0;
 
     for (idx, event_json) in events.iter().enumerate() {
@@ -223,7 +223,7 @@ fn process_trace_batch(
     result.set_item("traces_received", events.len())?;
     result.set_item("traces_processed", traces_processed)?;
     result.set_item("detections", detections)?;
-    Ok(result.into())
+    Ok(result)
 }
 
 /// Per-trace outcome record extracted for the batch's `detections`
@@ -238,9 +238,9 @@ struct PerTraceSummary {
 /// Process one trace through the v0.1.0 science layer + sign + put.
 /// All persist primitives invoked via the `engine` argument; no key
 /// material touches lens-core.
-fn process_one(
-    py: Python<'_>,
-    engine: &PyAny,
+fn process_one<'py>(
+    py: Python<'py>,
+    engine: &Bound<'py, PyAny>,
     event_json: &str,
     signing_key_id: &str,
 ) -> PyResult<PerTraceSummary> {
@@ -303,20 +303,20 @@ fn process_one(
     let ed25519_obj = engine
         .call_method1("steward_sign", (canonical_pybytes,))
         .map_err(|e| PyRuntimeError::new_err(format!("engine.steward_sign: {e}")))?;
-    let ed25519_sig: Vec<u8> = ed25519_obj.downcast::<PyBytes>()?.as_bytes().to_vec();
+    let ed25519_sig: Vec<u8> = ed25519_obj.cast::<PyBytes>()?.as_bytes().to_vec();
 
     // Hybrid binding: PQC signs (canonical_bytes ++ ed25519_sig).
     // Replicates StewardSigner::sign_hybrid's internal construction
     // so verify_hybrid_via_directory (invoked inside
     // engine.put_detection_event) recognizes it.
-    let mut bound = Vec::with_capacity(prepared.canonical_bytes.len() + 64);
-    bound.extend_from_slice(&prepared.canonical_bytes);
-    bound.extend_from_slice(&ed25519_sig);
-    let bound_pybytes = PyBytes::new(py, &bound);
+    let mut bound_msg = Vec::with_capacity(prepared.canonical_bytes.len() + 64);
+    bound_msg.extend_from_slice(&prepared.canonical_bytes);
+    bound_msg.extend_from_slice(&ed25519_sig);
+    let bound_pybytes = PyBytes::new(py, &bound_msg);
     let pqc_obj = engine
         .call_method1("steward_pqc_sign", (bound_pybytes,))
         .map_err(|e| PyRuntimeError::new_err(format!("engine.steward_pqc_sign: {e}")))?;
-    let ml_dsa_65_sig: Vec<u8> = pqc_obj.downcast::<PyBytes>()?.as_bytes().to_vec();
+    let ml_dsa_65_sig: Vec<u8> = pqc_obj.cast::<PyBytes>()?.as_bytes().to_vec();
 
     let (event, _summary) = assemble_event(
         &inputs,
@@ -343,15 +343,19 @@ fn process_one(
 // ─── Substrate-delegated (thin wrappers over ciris_persist) ───────
 
 /// Scrub a single trace per the requested trace-level. Returns
-/// `{"trace": <scrubbed_object>, "level": <level_str>, "stats": <stats_dict>}`.
+/// `{"trace": "<json string>", "level": <level_str>, "stats": <stats_dict>}`.
 #[pyfunction]
-fn scrub_trace(py: Python<'_>, trace_json: &str, level: &str) -> PyResult<PyObject> {
+fn scrub_trace<'py>(
+    py: Python<'py>,
+    trace_json: &str,
+    level: &str,
+) -> PyResult<Bound<'py, PyDict>> {
     let value: serde_json::Value = serde_json::from_str(trace_json)
         .map_err(|e| PyValueError::new_err(format!("invalid trace JSON: {e}")))?;
     let parsed_level = parse_level(level)?;
     let scrubbed = persist_scrub::scrub_trace(value, parsed_level)
         .map_err(|e| PyRuntimeError::new_err(format!("scrub failed: {e}")))?;
-    Ok(scrubbed_to_dict(py, scrubbed, level)?.into())
+    scrubbed_to_dict(py, scrubbed, level)
 }
 
 /// Scrub a batch of traces with one shared NER forward pass. Returns
@@ -359,9 +363,9 @@ fn scrub_trace(py: Python<'_>, trace_json: &str, level: &str) -> PyResult<PyObje
 #[pyfunction]
 fn scrub_traces_batch<'py>(
     py: Python<'py>,
-    traces_json: Vec<&str>,
+    traces_json: Vec<String>,
     level: &str,
-) -> PyResult<&'py PyList> {
+) -> PyResult<Bound<'py, PyList>> {
     let mut values = Vec::with_capacity(traces_json.len());
     for (i, s) in traces_json.iter().enumerate() {
         let v: serde_json::Value = serde_json::from_str(s)
@@ -391,7 +395,7 @@ fn ner_is_configured() -> PyResult<bool> {
 /// PyO3 cdylib entry. v0.1.0 exposes the 4 function names the
 /// deployed lens still calls into post-cutover.
 #[pymodule]
-fn ciris_lens_core(_py: Python<'_>, m: &PyModule) -> PyResult<()> {
+fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_trace_batch, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_trace, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_traces_batch, m)?)?;
