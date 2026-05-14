@@ -33,7 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # `cache-bin: false` per persist v0.7.3 closure: the macos-14
+      # runner image ships a rustup stub at
+      # `/Users/runner/.cargo/bin/cargo` that falls through to
+      # `rustup-init` when the toolchain isn't installed locally.
+      # dtolnay's action installs the real cargo into the same
+      # directory; without `cache-bin: false`, rust-cache restores
+      # the rustup-stub from a prior run's cache, masking the real
+      # cargo and breaking subsequent `cargo` calls with
+      # "unexpected argument 'test'". Linux runners unaffected.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - name: cargo test (no python)
         run: cargo test --no-default-features
 
@@ -85,6 +96,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # `cache-bin: false` on macos-14 only (linux runners unaffected
+      # by the rustup-stub issue). Cheaper to enable on all matrix
+      # entries than to conditionalize — the cache hit ratio drops
+      # slightly but builds are correct.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
