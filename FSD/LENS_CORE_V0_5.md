@@ -227,9 +227,46 @@ The new code in v0.5:
 | `src/egress/fanout.rs` | ~150 | Per-upstream copy + durable-enqueue |
 | `src/retention/policy.rs` | ~250 | Disk-budget + time-budget eviction; calls `engine.delete_traces_older_than()` (persist ask if new) |
 | `src/wire/contract.rs` | ~350 | Public ABI: CompleteTrace, BatchEnvelope, BatchEvent, TraceComponent, Ed25519TraceSigner, TraceDetailLevel as `pub` Rust types + PyO3 classes |
-| `src/ffi/pyo3.rs` (expansion) | ~600 (was 326) | `LensCore.client/relay/node`, `.audit.*`, `.capture.*`, retention APIs |
+| `src/ffi/pyo3.rs` (expansion) | ~600 (was 326) | `LensCore.client/relay/node`, `.audit.*`, `.capture.*`, `.scores.*`, `.alerts.*`, retention APIs |
+| `src/scores/lookup.rs` | ~150 | Agent-side read path: `get_for_trace`, `get_for_agent_window`, score-aggregate queries via persist's detection_events table |
+| `src/alerts/subscription.rs` | ~200 | Alert delivery — in-process callback for embedded mode, persist pub/sub for distributed; typed alert payloads |
+| `src/detector/{cohort_mismatch,manifold_outlier,unconsented_external_probe}.rs` | ~400 | Real detector impls landing alongside RATCHET calibration; UnconsentedExternalProbe is RATCHET's Counter-RII contribution, gated on consent-role primitives upstream |
 
-Total v0.5 net-new code: ~2,500 LOC on top of v0.1.1's 2,498. Final footprint ~5,000 LOC, of which roughly 60% is the new PyO3 surface (mostly straight delegation) + 40% is policy logic (egress filtering, retention, role construction). Substrate composition; not substrate writing.
+Total v0.5 net-new code: ~3,250 LOC on top of v0.1.1's 2,498. Final footprint ~5,750 LOC, of which roughly 55% is the PyO3 surface (mostly straight delegation) + 30% is policy logic (egress filtering, retention, role construction) + 15% is the detector implementations gated on RATCHET calibration. Substrate composition; not substrate writing.
+
+### 4.6 The agent's self-awareness loop
+
+A v0.5 invariant worth stating explicitly: **the agent never computes its own scores.** All scoring originates in lens-core. The agent emits via `lens.capture.event(...)`; lens-core scores; the agent reads back via `lens.scores.*` and subscribes to alerts via `lens.alerts.subscribe(...)`.
+
+```text
+Agent emits ──────► LensCore ──────► Scoring engine ──────► persist::derived (signed)
+                                          │
+                                          ├──► alerts ────► agent (callback / pub-sub)
+                                          │
+                                          └──► forwarding (filtered per upstream)
+
+Agent reads ◄─────── LensCore.scores ◄─────── persist::derived (Engine.get_detection_events)
+```
+
+This closes the loop. The agent doesn't reimplement manifold-conformity math; the agent doesn't carry detector code; the agent doesn't second-guess RATCHET calibration. Single source of scoring truth = lens-core. Agent's behavior-adjustment code reads `lens.scores.get_for_trace(trace_id)` after its decisions and reacts to alerts.
+
+This is what enables the agent-fold (PoB §3.1): when lens-core folds into the agent, the score-and-react loop becomes intra-process Rust function calls, not an external service call. Same code path; tighter coupling.
+
+### 4.7 Detector catalog (v0.5)
+
+Lens-core ships detector implementations as separate modules under `src/detector/`. Each lands when RATCHET's calibration is ready and the upstream substrate dependencies close.
+
+| Detector | RATCHET spec | What it detects | Lens-core dependencies (upstream) |
+|---|---|---|---|
+| `cohort_declared_inferred_mismatch` | CIRISLensCore THREAT_MODEL.md LC-AV-2 | Declared 6-tuple cohort ≠ inferred cohort from features. P0 in lens-core's threat model. | RATCHET calibration bundle (CIRISLensCore#3 closure) |
+| `manifold_conformity_outlier` | RATCHET CCA paper §F + CRC paper | Trace's 16-feature projection ≥ N σ from cohort centroid. The primary numeric scoring path. | RATCHET calibration bundle |
+| `unconsented_external_probe` | RATCHET `FSD/COUNTER_RII_DETECTION.md` | RII-shaped (Recursive Instance Inspection) activity originating outside the agent's consent and audit perimeter. The lens-core piece of a four-layer defense (silicon / wire / trace / federation). | (1) Accord §RC `consent_role` primitive (CIRISAgent — OQ-1, OQ-2, OQ-3 open); (2) `consent_role` schema in `federation_keys` (CIRISPersist ask); (3) `edge_detection_events` table (CIRISPersist ask); (4) `ProbePatternObserver` module (CIRISEdge ask); (5) joint correlation with edge's detection event for the same `signing_key_id` |
+
+**The five existing CCA paper §F ratchet detectors** (cross-agent divergence, intra-agent stability, hash-chain integrity, temporal drift, conscience-override pattern) are aspirational v0.6+ work — v0.5 ships the three above and the framework that lets §F detectors land as additional `src/detector/<name>.rs` modules.
+
+**Why UnconsentedExternalProbe is structurally distinct from the manifold detector:** Manifold-conformity is *content-anomaly* on the agent's own reasoning trace. UnconsentedExternalProbe is *induced-response anomaly* — comparing the agent's response to an inbound probe against the consent posture of the probe's sender. The lens-core detector uses the same 16-feature projection but joins it to edge's `ProbePatternObserver` signal for the same `signing_key_id` over the same window. RATCHET's spec names the specific induced-response markers: elevated `idma_correlation_risk`, depressed `idma_k_eff`, flipping `idma_phase`, displacement on `entropy_level` + `coherence_level`, processing-time + `llm_calls` anomalies.
+
+The detector NEVER fires on SelfConscience traffic (agent's own H3ERE) — that's a formally-proved invariant in RATCHET's `formal/RATCHET/Core/ConsentGate.lean` (F-CR-3 zero-by-construction). Lens-core's implementation MUST honor this by gating signal emission on the consent role of the sender; the formal proof is the design contract.
 
 ---
 
