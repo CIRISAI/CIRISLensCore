@@ -75,6 +75,7 @@ pub mod observability;
 pub mod pipeline;
 pub mod scoring;
 pub mod signing;
+pub mod wire;
 
 // Public re-exports — the API surface the host (lens-deployed-product
 // today; agent post-fold) consumes. Stable across patch versions;
