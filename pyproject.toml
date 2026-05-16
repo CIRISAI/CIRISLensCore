@@ -25,20 +25,18 @@ classifiers = [
 # console scripts). Deployed lens + agent get one install command for
 # the whole lens+persist+verify stack.
 #
-# Pin to >=0.9.1 because that's the persist release where the PyPI
-# wheel ships the full 11-feature omnibus (pyo3 + sqlite + cirisgraph
-# + cirisaudit + telemetry + cirisincident + secrets + cirisnode +
-# extract + classify + scrub — CIRISPersist#41 closure went beyond
-# Option A). Below this floor, sovereign / Pi / iOS deployments hit
-# the postgres-only wheel and can't run sqlite without a source
-# build. Matches CIRISEdge v0.1.4's transitive pin for federation
-# single-version discipline.
+# Pin to >=1.1.2 because that's CIRISEdge v0.2.1's transitive pin
+# (federation single-version discipline) AND it's where persist's
+# Path A polymorphic Pipeline<E: WireEnvelope> + Edge wire-transport
+# substrate landed (v1.1.0). Below this floor, the v0.5 FSD's
+# init_edge_runtime + LensCore::relay paths don't have the substrate
+# types they compose against.
 #
-# Pin to <1 because we expect persist to follow semver-major on
-# breaking changes; v0.1.x lens-core consumes v0.x persist. Bump
-# upper bound when v0.2.x lens-core coordinates with v1.x persist.
+# Pin to <2 because we expect persist to follow semver-major on
+# breaking changes; v0.1.x lens-core consumes v1.x persist. Bump
+# upper bound when v0.2.x lens-core coordinates with v2.x persist.
 dependencies = [
-    "ciris-persist>=0.9.1,<1",
+    "ciris-persist>=1.1.2,<2",
 ]
 dynamic = ["version"]
 
