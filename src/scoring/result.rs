@@ -65,15 +65,15 @@ pub enum UnavailableReason {
     /// Detector implementation panicked. Marked with
     /// lens_core_version per LC-AV-19.
     DetectorPanic { detector: &'static str },
-    /// Steward-sign failure on the detection event side; the score
+    /// Local-sign failure on the detection event side; the score
     /// itself was computed, but the signed-record path didn't land.
     /// Caller decides whether to surface or retry.
-    StewardSignFailure,
+    LocalSignFailure,
 }
 
 /// A single detection event from one of the layered detectors
 /// (cohort mismatch, manifold conformity, 5 ratchet detectors).
-/// Signed via persist.steward_sign before this struct surfaces;
+/// Signed via persist.local_sign before this struct surfaces;
 /// caller observes for alerting + audit.
 #[derive(Debug, Clone)]
 pub struct DetectionEvent {

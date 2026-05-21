@@ -16,7 +16,7 @@
 //!
 //! | v0.1.0 fn | Disposition |
 //! |---|---|
-//! | `process_trace_batch(engine, events, ...)` | **lens-core orchestrates the science layer; persist signs + persists.** Engine is the deployed lens's `ciris_persist.Engine` — lens-core calls `engine.steward_sign` + `engine.steward_pqc_sign` + `engine.put_detection_event` dynamically. Lens-core never holds keys. |
+//! | `process_trace_batch(engine, events, ...)` | **lens-core orchestrates the science layer; persist signs + persists.** Engine is the deployed lens's `ciris_persist.Engine` — lens-core calls `engine.local_sign` + `engine.local_pqc_sign` + `engine.put_detection_event` dynamically. Lens-core never holds keys. |
 //! | `scrub_trace(trace_json, level)` | **delegates to `ciris_persist::pipeline::scrub::scrub_trace`** |
 //! | `scrub_traces_batch(traces_json, level)` | **delegates to `ciris_persist::pipeline::scrub::scrub_traces_batch`** |
 //! | `ner_is_configured()` | **delegates to `ciris_persist::pipeline::scrub::ner::is_configured`** |
@@ -26,7 +26,7 @@
 //! Lens-core is a science layer, not a federation identity. The
 //! signing identity belongs to the host (the deployed lens today;
 //! the agent post-fold). The host constructs the persist Engine
-//! with its own steward keys; lens-core uses the Engine as a signing
+//! with its own local keys; lens-core uses the Engine as a signing
 //! oracle. This pattern survives the PoB §3.1 fold-into-agent —
 //! agents pass their Engine the same way the deployed lens does
 //! today.
@@ -132,12 +132,12 @@ fn severity_str(s: Severity) -> &'static str {
 /// # Engine contract
 ///
 /// `engine` is a `ciris_persist.Engine` instance constructed by the
-/// deployed lens with its own steward identity. Lens-core calls four
+/// deployed lens with its own local identity. Lens-core calls four
 /// methods dynamically:
 ///
-/// - `engine.steward_key_id()` — string identifier stamped onto rows
-/// - `engine.steward_sign(canonical_bytes)` → 64-byte Ed25519 signature
-/// - `engine.steward_pqc_sign(bound_bytes)` → 3309-byte ML-DSA-65 signature
+/// - `engine.local_key_id()` — string identifier stamped onto rows
+/// - `engine.local_sign(canonical_bytes)` → 64-byte Ed25519 signature
+/// - `engine.local_pqc_sign(bound_bytes)` → 3309-byte ML-DSA-65 signature
 /// - `engine.put_detection_event(event_json)` — verify-then-insert; verifies the hybrid signature under `HybridPolicy::Strict` before storing
 ///
 /// Lens-core never holds keys. Same Engine the deployed lens already
@@ -190,8 +190,8 @@ fn process_trace_batch<'py>(
 
     let batch_id = Uuid::new_v4().to_string();
     let signing_key_id: String = engine
-        .call_method0("steward_key_id")
-        .map_err(|e| PyRuntimeError::new_err(format!("engine.steward_key_id(): {e}")))?
+        .call_method0("local_key_id")
+        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_key_id(): {e}")))?
         .extract()?;
 
     let detections = PyList::empty(py);
@@ -301,12 +301,12 @@ fn process_one<'py>(
     // Sign via engine — lens-core never holds keys.
     let canonical_pybytes = PyBytes::new(py, &prepared.canonical_bytes);
     let ed25519_obj = engine
-        .call_method1("steward_sign", (canonical_pybytes,))
-        .map_err(|e| PyRuntimeError::new_err(format!("engine.steward_sign: {e}")))?;
+        .call_method1("local_sign", (canonical_pybytes,))
+        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_sign: {e}")))?;
     let ed25519_sig: Vec<u8> = ed25519_obj.cast::<PyBytes>()?.as_bytes().to_vec();
 
     // Hybrid binding: PQC signs (canonical_bytes ++ ed25519_sig).
-    // Replicates StewardSigner::sign_hybrid's internal construction
+    // Replicates LocalSigner::sign_hybrid's internal construction
     // so verify_hybrid_via_directory (invoked inside
     // engine.put_detection_event) recognizes it.
     let mut bound_msg = Vec::with_capacity(prepared.canonical_bytes.len() + 64);
@@ -314,8 +314,8 @@ fn process_one<'py>(
     bound_msg.extend_from_slice(&ed25519_sig);
     let bound_pybytes = PyBytes::new(py, &bound_msg);
     let pqc_obj = engine
-        .call_method1("steward_pqc_sign", (bound_pybytes,))
-        .map_err(|e| PyRuntimeError::new_err(format!("engine.steward_pqc_sign: {e}")))?;
+        .call_method1("local_pqc_sign", (bound_pybytes,))
+        .map_err(|e| PyRuntimeError::new_err(format!("engine.local_pqc_sign: {e}")))?;
     let ml_dsa_65_sig: Vec<u8> = pqc_obj.cast::<PyBytes>()?.as_bytes().to_vec();
 
     let (event, _summary) = assemble_event(

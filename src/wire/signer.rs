@@ -1,15 +1,15 @@
 //! `Ed25519TraceSigner` — typed wrapper around persist's
-//! `StewardSigner` for trace + audit-event signing.
+//! `LocalSigner` for trace + audit-event signing.
 //!
 //! Per `FSD/LENS_CORE_V0_5.md` §5.1. The trace-signing identity is
-//! the host's steward identity (CIRISAgent's steward for client-mode
-//! deployments; deployed-lens's steward for relay/node modes). This
+//! the host's local identity (CIRISAgent's local for client-mode
+//! deployments; deployed-lens's local for relay/node modes). This
 //! wrapper provides:
 //!
 //! 1. A typed API for *trace* signing specifically — distinguishing
 //!    it from generic envelope signing at the lens-core call site.
 //! 2. Sync sign_ed25519 + async sign_hybrid surfaces matching
-//!    `StewardSigner`'s contract; canonicalization wraps the wire-
+//!    `LocalSigner`'s contract; canonicalization wraps the wire-
 //!    contract `canonical_bytes` helper.
 //! 3. Pre-binds the hybrid signature construction (canonical_bytes
 //!    ++ ed25519_sig signed by PQC) so callers don't reimplement it.
@@ -18,33 +18,33 @@
 //!    `signing::event::sign_detection`).
 //!
 //! Lens-core never owns key material; this is a thin wrapper over a
-//! `StewardSigner` constructed by the host (persist's `Engine`).
+//! `LocalSigner` constructed by the host (persist's `Engine`).
 
 use std::sync::Arc;
 
-use ciris_persist::prelude::{StewardSigner, StewardSignerError};
+use ciris_persist::prelude::{LocalSigner, LocalSignerError};
 
 use super::{canonical_bytes, BatchEnvelope, CanonicalError};
 
-/// Typed trace-signing identity. Wraps a shared `StewardSigner` so
+/// Typed trace-signing identity. Wraps a shared `LocalSigner` so
 /// multiple call sites can sign without re-loading filesystem seeds.
 #[derive(Clone)]
 pub struct Ed25519TraceSigner {
-    signer: Arc<StewardSigner>,
+    signer: Arc<LocalSigner>,
 }
 
 impl Ed25519TraceSigner {
-    /// Wrap a pre-constructed `StewardSigner`. The signer must have
-    /// been loaded with the host's steward identity (filesystem
+    /// Wrap a pre-constructed `LocalSigner`. The signer must have
+    /// been loaded with the host's local identity (filesystem
     /// seeds for Ed25519 + optional ML-DSA-65). Lens-core never
     /// constructs the underlying signer; the host (CIRISAgent or
-    /// deployed-lens) constructs via `persist::signing::StewardSigner`
+    /// deployed-lens) constructs via `persist::signing::LocalSigner`
     /// and hands the `Arc` here.
-    pub fn new(signer: Arc<StewardSigner>) -> Self {
+    pub fn new(signer: Arc<LocalSigner>) -> Self {
         Self { signer }
     }
 
-    /// The wrapped steward identity's `key_id`. Stamped onto signed
+    /// The wrapped local identity's `key_id`. Stamped onto signed
     /// trace envelopes for federation-side verification via
     /// `verify_hybrid_via_directory`.
     pub fn key_id(&self) -> &str {
@@ -75,7 +75,7 @@ impl Ed25519TraceSigner {
     /// Hybrid-sign a [`BatchEnvelope`] — Ed25519 + ML-DSA-65 PQC
     /// bound construction (PQC signs canonical_bytes ++ ed25519_sig).
     /// Required for federation evidence; matches
-    /// `StewardSigner::sign_hybrid` and `verify_hybrid_via_directory`.
+    /// `LocalSigner::sign_hybrid` and `verify_hybrid_via_directory`.
     pub async fn sign_hybrid(&self, envelope: &BatchEnvelope) -> Result<SignedEnvelope, SignError> {
         let canonical = canonical_bytes(envelope)?;
         let ed25519_sig = self.signer.sign_ed25519(&canonical)?;
@@ -130,10 +130,10 @@ pub enum SignError {
     /// `CorrelationMetadata` variant).
     #[error("canonicalize: {0}")]
     Canonicalize(#[from] CanonicalError),
-    /// Underlying `StewardSigner` failed — seed read, PQC backend
+    /// Underlying `LocalSigner` failed — seed read, PQC backend
     /// error, or PQC not configured for the hybrid path.
     #[error("signer: {0}")]
-    Signer(#[from] StewardSignerError),
+    Signer(#[from] LocalSignerError),
     /// Signature byte length didn't match the federation-stable
     /// expectation (Ed25519: 64 bytes; ML-DSA-65: 3309 bytes per
     /// FIPS 204 final). Fail-fast for a clearer diagnostic.

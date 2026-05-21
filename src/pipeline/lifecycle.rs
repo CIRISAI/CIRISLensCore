@@ -17,7 +17,7 @@
 //!
 //! `VerifiedTrace` arrives from edge with verify already complete —
 //! lens-core never re-verifies (AV-9 structural attestation).
-//! Detection events are signed via persist's `StewardSigner`; the
+//! Detection events are signed via persist's `LocalSigner`; the
 //! caller writes them to persist via `DerivedSchema::put_detection_event`
 //! after [`process`] returns.
 //!
@@ -49,7 +49,7 @@ use std::sync::Arc;
 
 use ciris_edge::VerifiedTrace;
 use ciris_persist::pipeline::extract::extract_features;
-use ciris_persist::prelude::{DetectionEvent, StewardSigner};
+use ciris_persist::prelude::{DetectionEvent, LocalSigner};
 use ciris_persist::Journal;
 use serde_json::Value;
 
@@ -70,7 +70,7 @@ pub const LENS_CORE_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// [`Journal`] is held but not yet consumed by lifecycle — reserved
 /// for the SLO budget + observability spans landing in Phase 2.
 pub struct LensCore {
-    signer: Arc<StewardSigner>,
+    signer: Arc<LocalSigner>,
     #[allow(dead_code)]
     journal: Arc<Journal>,
 }
@@ -79,7 +79,7 @@ impl LensCore {
     /// Construct a `LensCore` from substrate handles. Both must be
     /// shared (`Arc`) because the orchestrator may be invoked from
     /// multiple worker threads in the deployed lens.
-    pub fn new(signer: Arc<StewardSigner>, journal: Arc<Journal>) -> Self {
+    pub fn new(signer: Arc<LocalSigner>, journal: Arc<Journal>) -> Self {
         Self { signer, journal }
     }
 

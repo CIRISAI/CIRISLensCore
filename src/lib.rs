@@ -15,7 +15,7 @@
 //!                                                                    │       ├── cohort     (declared + inferred routing)
 //!                                                                    │       ├── detector   (5 ratchet detectors + manifold)
 //!                                                                    │       ├── scoring    (capacity, N_eff, conformity)
-//!                                                                    │       └── signing    (via persist.steward_sign)
+//!                                                                    │       └── signing    (via persist.local_sign)
 //!                                                                    │
 //!                                                                    └─► Persist (signed event lands in audit chain)
 //! ```
@@ -51,7 +51,7 @@
 //!   byte reaches lens-core. Lens-core does NOT re-verify; it consumes
 //!   `VerifiedTrace` from edge and trusts the type-system attestation.
 //! - **Storage is implicit.** Persist owns trace_events + trace_llm_calls.
-//!   Lens-core holds an `Engine` handle, calls `engine.steward_sign` for
+//!   Lens-core holds an `Engine` handle, calls `engine.local_sign` for
 //!   detection events, never opens its own DB connection.
 //! - **Canonicalization is implicit.** `engine.canonicalize_envelope`
 //!   only — lens-core never re-implements canonicalization rules.

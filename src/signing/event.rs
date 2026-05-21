@@ -6,7 +6,7 @@
 //! cohort + detector + scoring  ──►  sign_detection  ──►  put_detection_event
 //!     (produce ManifoldConformity)        │                       │
 //!                                         ▼                       ▼
-//!                          canonicalize + StewardSigner    cirislens_derived.detection_events
+//!                          canonicalize + LocalSigner    cirislens_derived.detection_events
 //! ```
 //!
 //! The orchestrator (`pipeline::lifecycle::process`) gathers the
@@ -18,7 +18,7 @@
 //!
 //! # Hybrid signature binding
 //!
-//! Replicates `StewardSigner::sign_hybrid`'s internal construction —
+//! Replicates `LocalSigner::sign_hybrid`'s internal construction —
 //! the PQC (ML-DSA-65) signature is computed over the canonical
 //! bytes **bound with the Ed25519 signature**:
 //!
@@ -40,7 +40,7 @@ use uuid::Uuid;
 
 use ciris_persist::prelude::{
     canonicalize_envelope_for_signing, ConformityVariant, DetectionEvent, DetectionSeverity,
-    StewardSigner, StewardSignerError,
+    LocalSigner, LocalSignerError,
 };
 use serde_json::{json, Value};
 
@@ -49,7 +49,7 @@ use crate::scoring::result::{
 };
 
 /// Errors building + signing a detection event. Wraps the two upstream
-/// failure surfaces (canonicalization + steward signing) plus a
+/// failure surfaces (canonicalization + local signing) plus a
 /// signature-shape sanity check that fail-fast catches a misconfigured
 /// signer before we hand a malformed event to persist.
 #[derive(Debug, thiserror::Error)]
@@ -59,11 +59,11 @@ pub enum SigningError {
     /// happen in practice; surface for diagnostics if it does.
     #[error("canonicalize: {0}")]
     Canonicalize(String),
-    /// Steward signing failed — seed read, PQC backend error,
+    /// Local signing failed — seed read, PQC backend error,
     /// or PQC not configured (federation evidence requires hybrid,
     /// not Ed25519-only).
     #[error("sign: {0}")]
-    Sign(#[from] StewardSignerError),
+    Sign(#[from] LocalSignerError),
     /// Signature byte length didn't match the federation-stable
     /// expectation (Ed25519: 64 bytes; ML-DSA-65: 3309 bytes per
     /// FIPS 204 final). Caller's persist row would fail the DB CHECK
@@ -115,7 +115,7 @@ pub struct PreparedDetection {
     /// envelope (in case verifiers want to bound) and the eventual
     /// row's `ts` column.
     pub ts: DateTime<Utc>,
-    /// Canonical-JSON bytes the caller signs. Sent to the steward
+    /// Canonical-JSON bytes the caller signs. Sent to the local
     /// signer (Ed25519 + ML-DSA-65 hybrid) by either path.
     pub canonical_bytes: Vec<u8>,
     /// Pre-mapped persist severity enum (`info` / `warning` / `critical`).
@@ -133,8 +133,8 @@ pub struct PreparedDetection {
 /// Build the canonical envelope + canonical bytes from inputs. Pure
 /// function. Used by both `sign_detection` (rlib path, signer
 /// invokes itself) and the PyO3 `process_trace_batch` (engine
-/// invokes the signer via `Engine.steward_sign` /
-/// `Engine.steward_pqc_sign`).
+/// invokes the signer via `Engine.local_sign` /
+/// `Engine.local_pqc_sign`).
 pub fn prepare_detection(
     inputs: &DetectionInputs<'_>,
     signing_key_id: &str,
@@ -230,12 +230,12 @@ pub fn assemble_event(
 /// Build a [`DetectionEvent`] from `inputs`, canonicalize the signed
 /// envelope, hybrid-sign with `signer`, return the ready-to-persist
 /// row alongside a lens-core summary. RLib path; the PyO3 path
-/// composes [`prepare_detection`] + `Engine.steward_sign` / `_pqc_sign`
+/// composes [`prepare_detection`] + `Engine.local_sign` / `_pqc_sign`
 /// + [`assemble_event`] directly.
 ///
-/// Async because [`StewardSigner::sign_ml_dsa_65`] is async.
+/// Async because [`LocalSigner::sign_ml_dsa_65`] is async.
 pub async fn sign_detection(
-    signer: &StewardSigner,
+    signer: &LocalSigner,
     inputs: DetectionInputs<'_>,
 ) -> Result<(DetectionEvent, Summary), SigningError> {
     let prepared = prepare_detection(&inputs, signer.key_id())?;
@@ -305,7 +305,7 @@ fn unavailable_payload(reason: &UnavailableReason) -> Value {
             "reason": "detector_panic",
             "detector": detector,
         }),
-        UnavailableReason::StewardSignFailure => json!({ "reason": "steward_sign_failure" }),
+        UnavailableReason::LocalSignFailure => json!({ "reason": "local_sign_failure" }),
     }
 }
 
@@ -399,10 +399,10 @@ mod tests {
     }
 
     #[test]
-    fn conformity_unavailable_steward_sign_failure() {
+    fn conformity_unavailable_local_sign_failure() {
         let (_, payload) = conformity_to_persist(&ManifoldConformity::Unavailable {
-            reason: UnavailableReason::StewardSignFailure,
+            reason: UnavailableReason::LocalSignFailure,
         });
-        assert_eq!(payload["reason"], "steward_sign_failure");
+        assert_eq!(payload["reason"], "local_sign_failure");
     }
 }
