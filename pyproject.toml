@@ -33,13 +33,15 @@ classifiers = [
 # resolve LensCore to a different patch than NodeCore/agent and
 # break the singleton. Exact `==` is the contract.
 #
-# v1.7.4 carries: Engine process-singleton + lifecycle (v1.6.8),
-# Engine.engine_handle() injectable handle + consumer registry
-# (v1.7.0), register_consumer per-substrate ownership (v1.7.1/3/4).
-# Coordinated with CIRISNodeCore#5 + CIRISEdge#10 — all three pin
-# the identical v1.7.4. Re-pin in lockstep, never unilaterally.
+# v1.8.1 is the re-converged cohabitation pin: CIRISEdge v0.2.5
+# already moved here; CIRISNodeCore + CIRISAgent re-target the
+# identical v1.8.1. v1.8.1 carries the v1.6.8 Engine process-
+# singleton + v1.7.0 engine_handle() injectable handle + consumer
+# registry + v1.7.1/3/4 register_consumer per-substrate ownership,
+# plus the v1.8.0/v1.8.1 follow-ons. Re-pin in lockstep with edge +
+# NodeCore + agent, never unilaterally.
 dependencies = [
-    "ciris-persist==1.7.4",
+    "ciris-persist==1.8.1",
 ]
 dynamic = ["version"]
 
