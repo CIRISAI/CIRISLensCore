@@ -73,6 +73,7 @@ pub mod extract;
 pub mod ffi;
 pub mod observability;
 pub mod pipeline;
+pub mod role;
 pub mod scoring;
 pub mod signing;
 pub mod wire;
@@ -82,4 +83,5 @@ pub mod wire;
 // changes require a deprecation window.
 
 pub use pipeline::lifecycle::{LensCore, Outcome};
+pub use role::{LensCoreHandler, RelayError, RelayHandle};
 pub use scoring::result::{ManifoldConformity, Score};
