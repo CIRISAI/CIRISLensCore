@@ -19,6 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # ciris-keyring's `tpm` feature is auto-enabled for Linux
+      # targets by ciris-persist v1.10.0+ (CIRISPersist#87); cargo
+      # unions the feature across the graph so lens-core inherits it
+      # even though it never asks for `tpm`. Building tss-esapi links
+      # system libtss2. Mirrors edge's CIRISEdge#12 CI fix.
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (python feature)
@@ -54,6 +61,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # libtss2 for the tpm keyring feature — clippy compiles the
+      # full dependency graph. See linux-x86_64-test; CIRISEdge#12.
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -95,6 +106,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # libtss2 for the tpm keyring feature on the Linux wheel
+      # builds; the macos-14 matrix entry skips it (no apt, and the
+      # tpm feature is Linux-target-only). See CIRISEdge#12.
+      - name: install libtss2-dev (TPM build dep)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
       - uses: dtolnay/rust-toolchain@stable
       # `cache-bin: false` on macos-14 only (linux runners unaffected
       # by the rustup-stub issue). Cheaper to enable on all matrix
