@@ -30,6 +30,10 @@ allow = [
     # compatible; transitive via ciris-verify-core's reqwest/ureq
     # stack — same finding persist + edge document.
     "CDLA-Permissive-2.0",
+    # borrow-or-share v0.2.4 — MIT-0 (MIT No Attribution). Permissive;
+    # AGPL-compatible. Transitive via fluent-uri → reqwest (edge
+    # v0.10.0's transport-http stack).
+    "MIT-0",
     # libbz2-rs-sys (Rust bzip2 port). Permissive BSD-style; AGPL-
     # compatible. Transitive via reticulum-core's `compression`
     # feature → reticulum-std default → ciris-edge `transport-
