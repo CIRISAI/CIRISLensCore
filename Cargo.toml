@@ -90,6 +90,11 @@ default = []
 # Python lens to consume during the v0.1.0–v0.2.x window. Defaults
 # off for the post-fold-into-agent trajectory; lens-deployed-product
 # enables.
-python = ["pyo3"]
+#
+# `python` also propagates `pyo3` to edge + persist so the
+# cohabitation accessors lens-core needs — `ciris_edge::ffi::pyo3::
+# PyEdge` (for the shared `Arc<Edge>`) + `ciris_persist::ffi::pyo3::
+# current_rust_engine` (CIRISPersist#92, v1.13.0+) — are visible.
+python = ["pyo3", "ciris-edge/pyo3", "ciris-persist/pyo3"]
 
 # Benches re-added when benchmark sources land (Phase 1).

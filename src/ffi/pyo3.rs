@@ -390,16 +390,68 @@ fn ner_is_configured() -> PyResult<bool> {
     Ok(ner::is_configured())
 }
 
+// ─── Cohabitation: relay-handler install (CIRIS 3.0) ──────────────
+
+/// Register lens-core's relay handler on a shared `ciris_edge.Edge`
+/// — the CIRIS 3.0 cohabitation bootstrap entry for the lens.
+///
+/// Mirrors `ciris_node_core.install_from_dispatch(...)`. The agent
+/// (Python) has already constructed the shared persist `Engine` and
+/// `Edge` (`ciris_edge.init_edge_runtime(...)`); this call hooks
+/// lens-core's `Handler<AccordEventsBatch>` onto that shared Edge.
+/// After this returns, the lens is a key-addressable Edge endpoint:
+/// peers routing `AccordEventsBatch` to its `key_id` land here and
+/// flow into `engine.receive_and_persist` (CIRISPersist#89) via
+/// [`LensCoreHandler`](crate::role::LensCoreHandler).
+///
+/// # Cohabitation invariant
+///
+/// One `Edge` per process, owned by the agent, shared by sibling
+/// consumers (lens, NodeCore). The `Arc<Engine>` is fetched from the
+/// persist singleton (`current_rust_engine`) — same engine `PyEngine`
+/// dispatches to; no second engine, runtime, or connection pool.
+///
+/// # Python signature
+///
+/// `ciris_lens_core.install_relay(edge)` — `edge` is the
+/// `ciris_edge.Edge` instance returned by `ciris_edge.
+/// init_edge_runtime(...)`. Engine is implicit (singleton).
+///
+/// # Errors
+///
+/// - `RuntimeError("persist Engine not initialized")` — host hasn't
+///   constructed `ciris_persist.Engine` yet, or `close()` cleared it.
+/// - `RuntimeError("persist runtime handle not available")` — same
+///   condition; the singleton runtime is gone.
+/// - `RuntimeError("attach lens-core relay handler: …")` — edge
+///   refused the handler registration (typically already-registered
+///   for `AccordEventsBatch`).
+#[pyfunction]
+fn install_relay(edge: PyRef<'_, ciris_edge::ffi::pyo3::PyEdge>) -> PyResult<()> {
+    let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "persist Engine not initialized — construct ciris_persist.Engine first",
+        )
+    })?;
+    let handle = ciris_persist::ffi::pyo3::current_runtime_handle()
+        .ok_or_else(|| PyRuntimeError::new_err("persist runtime handle not available"))?;
+    let edge_arc = edge.edge_handle();
+    handle
+        .block_on(crate::LensCore::attach_handler(&edge_arc, engine))
+        .map_err(|e| PyRuntimeError::new_err(format!("attach lens-core relay handler: {e}")))
+}
+
 // ─── Module entry ─────────────────────────────────────────────────
 
-/// PyO3 cdylib entry. v0.1.0 exposes the 4 function names the
-/// deployed lens still calls into post-cutover.
+/// PyO3 cdylib entry. The original 4 deployed-lens drop-in functions
+/// plus the v0.2 cohabitation bootstrap (`install_relay`).
 #[pymodule]
 fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_trace_batch, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_trace, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_traces_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ner_is_configured, m)?)?;
+    m.add_function(wrap_pyfunction!(install_relay, m)?)?;
     m.add(
         "PROJECTION_VERSION",
         crate::extract::projection::PROJECTION_VERSION,

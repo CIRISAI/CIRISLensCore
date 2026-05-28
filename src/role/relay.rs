@@ -113,6 +113,24 @@ impl LensCore {
             listen_addr,
         })
     }
+
+    /// Register lens-core's relay handler on a **pre-built shared
+    /// Edge** — the CIRIS 3.0 cohabitation entry point.
+    ///
+    /// The host has already constructed the Edge (via the agent's
+    /// `ciris_edge::ffi::pyo3::init_edge_runtime` in Python, or
+    /// `EdgeBuilder` in pure Rust); lens-core attaches its
+    /// `Handler<AccordEventsBatch>` to that shared `Edge` rather than
+    /// building a second one. Cohabitation invariant: **one** Edge per
+    /// process, owned by the host, shared by sibling consumers.
+    ///
+    /// Standalone-mode callers (no co-resident agent) use
+    /// [`relay`](Self::relay) instead — it builds its own Edge and
+    /// returns a [`RelayHandle`] for orderly shutdown.
+    pub async fn attach_handler(edge: &Edge, engine: Arc<Engine>) -> Result<(), EdgeError> {
+        edge.register_handler::<AccordEventsBatch, _>(LensCoreHandler::new(engine))
+            .await
+    }
 }
 
 /// Load an Edge [`LocalSigner`] from a seed directory via
