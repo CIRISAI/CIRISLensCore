@@ -45,7 +45,7 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v3.0.1"
 # lens-core consumes pure-Rust (post-fold). Pin matches persist +
 # edge (0.28 + abi3-py311) for federation single-version discipline
 # and produces the cp311-abi3 wheel maturin expects.
-pyo3 = { version = "0.28", features = ["extension-module", "abi3-py311"], optional = true }
+pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"], optional = true }
 
 # Serde + canonicalization
 serde = { version = "1.0", features = ["derive"] }

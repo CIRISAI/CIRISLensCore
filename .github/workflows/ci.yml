@@ -83,7 +83,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  # ─── pyo3-wheel: maturin abi3-py311 wheels ──────────────────────────
+  # ─── pyo3-wheel: maturin abi3-py310 wheels ──────────────────────────
   #
   # Three wheels per release. Matrix mirrors persist + edge exactly
   # (linux x86_64 + aarch64, darwin arm64). darwin-x86_64 omitted —
@@ -95,7 +95,7 @@ jobs:
   # avoid cross-compile drama (sysroot, linkers, vendored crypto
   # quirks).
   pyo3-wheel:
-    name: maturin abi3-py311 wheel (${{ matrix.label }})
+    name: maturin abi3-py310 wheel (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
@@ -122,20 +122,20 @@ jobs:
           cache-bin: false
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: "3.10"
       - name: install maturin
         run: pip install maturin
       - name: maturin build
         run: maturin build --release --strip
       - name: confirm wheel shape
-        # Reject anything that isn't cp311-abi3 — mixed-mode maturin
+        # Reject anything that isn't cp310-abi3 — mixed-mode maturin
         # can silently emit cp31N-cp31N wheels which break consumer
         # install on other minors. Catching at build time, before
         # PyPI. Same v0.1.10-regression closure persist + edge use.
         run: |
           ls -la target/wheels/
-          if ! ls target/wheels/*-cp311-abi3-*.whl >/dev/null 2>&1; then
-            echo "::error::Expected cp311-abi3 wheel for ${{ matrix.label }}; got:"
+          if ! ls target/wheels/*-cp310-abi3-*.whl >/dev/null 2>&1; then
+            echo "::error::Expected cp310-abi3 wheel for ${{ matrix.label }}; got:"
             ls target/wheels/*.whl 2>/dev/null || echo "  (no wheels)"
             exit 1
           fi
@@ -199,13 +199,13 @@ jobs:
             exit 1
           fi
           for wheel in dist/*.whl; do
-            if ! [[ "${wheel}" =~ -cp311-abi3- ]]; then
+            if ! [[ "${wheel}" =~ -cp310-abi3- ]]; then
               echo "::error::Non-abi3 wheel detected: ${wheel}"
               exit 1
             fi
             echo "✓ ${wheel}"
           done
-          echo "✓ All ${COUNT} wheels conform to cp311-abi3."
+          echo "✓ All ${COUNT} wheels conform to cp310-abi3."
       - name: publish to PyPI via OIDC trusted publishing
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
