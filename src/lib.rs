@@ -68,6 +68,7 @@
 // this file just declares the scope.
 
 pub mod cohort;
+pub mod config;
 pub mod detector;
 pub mod extract;
 pub mod ffi;
@@ -82,6 +83,7 @@ pub mod wire;
 // today; agent post-fold) consumes. Stable across patch versions;
 // changes require a deprecation window.
 
+pub use config::{EgressFilter, RetentionPolicy, UpstreamLens};
 pub use pipeline::lifecycle::{LensCore, Outcome};
 pub use role::{LensCoreHandler, RelayError, RelayHandle};
 pub use scoring::result::{ManifoldConformity, Score};
