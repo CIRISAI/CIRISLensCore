@@ -25,21 +25,25 @@ classifiers = [
 # console scripts). Deployed lens + agent get one install command for
 # the whole lens+persist+verify stack.
 #
-# EXACT pin to v1.12.0 — the CIRIS 3.0 in-process cohabitation
+# EXACT pin to v2.2.0 — the CIRIS 3.0 in-process cohabitation
 # convergence pin (CIRISLensCore#22). For agent + NodeCore + LensCore
 # co-resident in one process, every consumer must link ONE identical
 # ciris-persist: a single tokio runtime, a single process-singleton
-# Engine (persist v1.6.8 #75–#78). A version RANGE would let pip
-# resolve LensCore to a different patch than NodeCore/agent and
-# break the singleton. Exact `==` is the contract.
+# Engine. A version RANGE would let pip resolve LensCore to a
+# different patch than NodeCore/agent and break the singleton.
+# Exact `==` is the contract.
 #
-# v1.12.0 is the live CIRIS 3.0 cohabitation convergence point:
-# CIRISEdge v0.4.0 already moved here (persist v1.12.0 + verify
-# v2.8.0); CIRISNodeCore + CIRISAgent re-target the identical
-# v1.12.0. Carries the v1.6.8 Engine process-singleton + v1.11.0's
-# Engine::receive_and_persist ingest facade (#89) — the primitive
-# CIRISLensCore#10's relay handler builds on — plus v1.12.0's
-# cold-start binding rooting.
+# v2.2.0 is the live CIRIS 3.0 cohabitation convergence point:
+# CIRISEdge v0.7.1 already moved here (persist v2.2.0 + verify
+# v3.0.1); CIRISNodeCore + CIRISAgent re-target the identical
+# v2.2.0. Persist v2.0.0 "Federation Ready" (#95 cohabitation
+# accessors — closes #92, unblocks CIRISLensCore#10 PyO3 half) +
+# v1.11.0's Engine::receive_and_persist ingest facade (#89) — the
+# primitives CIRISLensCore#10's relay handler builds on. v2.0.x +
+# v2.1.0 added iOS/Android cross-compile + #101 federation_
+# announcement / delivery_attestation substrate. verify v3.0.1
+# (MAJOR from v2.x) is transitive via persist + edge — single
+# version across the federation tree.
 #
 # DEPLOYMENT NOTE — libtss2: persist v1.10.0 (CIRISPersist#87)
 # auto-enables ciris-keyring's `tpm` feature for Linux targets;
@@ -50,7 +54,7 @@ classifiers = [
 # Lens-core's CI installs `libtss2-dev` on its Linux jobs (mirrors
 # CIRISEdge#12). Re-pin in lockstep with edge + NodeCore + agent.
 dependencies = [
-    "ciris-persist==1.12.0",
+    "ciris-persist==2.2.0",
 ]
 dynamic = ["version"]
 
