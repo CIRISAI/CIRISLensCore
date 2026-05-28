@@ -30,8 +30,24 @@ allow = [
     # compatible; transitive via ciris-verify-core's reqwest/ureq
     # stack — same finding persist + edge document.
     "CDLA-Permissive-2.0",
+    # libbz2-rs-sys (Rust bzip2 port). Permissive BSD-style; AGPL-
+    # compatible. Transitive via reticulum-core's `compression`
+    # feature → reticulum-std default → ciris-edge `transport-
+    # reticulum` (auto-enabled by edge's `pyo3` feature).
+    "bzip2-1.0.6",
 ]
 confidence-threshold = 0.85
+
+# unescaper v0.1.8 declares `license = "GPL-3.0/MIT"` — the
+# deprecated SPDX slash-separator dual-license syntax cargo-deny
+# can't parse. The crate's intent is MIT-or-GPL; pick MIT (already
+# in the allow list above; AGPL-compatible). Transitive via
+# serialport → tokio-serial → reticulum-std → ciris-edge (edge's
+# `pyo3` feature implies `transport-reticulum`, OQ-07).
+[[licenses.clarify]]
+name = "unescaper"
+expression = "MIT"
+license-files = []
 
 [bans]
 # Same posture as edge — duplicate transitive deps through pyo3 +
@@ -68,4 +84,8 @@ allow-git = [
     "https://github.com/CIRISAI/CIRISPersist",
     "https://github.com/CIRISAI/CIRISEdge",
     "https://github.com/CIRISAI/CIRISVerify",
+    # Leviculum — CIRIS-AI's reticulum-rs / reticulum-core. Transitive
+    # via ciris-edge's `transport-reticulum` feature (auto-enabled by
+    # edge's `pyo3` feature per CIRISEdge#16 cohabitation merge).
+    "https://github.com/CIRISAI/leviculum",
 ]
