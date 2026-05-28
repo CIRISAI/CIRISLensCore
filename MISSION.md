@@ -112,6 +112,24 @@ A single threshold is a single attack surface. Per-cohort thresholds
 + multi-window temporal smoothing + cross-detector layering is the
 mission-aligned shape. Simple threshold = one parameter to invert.
 
+**Polyglot prompt scope.** The cross-language torque signal lens-core
+measures is concentrated at exactly two CIRISAgent prompt surfaces by
+deliberate design — not distributed across all DMA / conscience
+outputs:
+
+- **PDMA** (`ciris_engine/logic/dma/prompts/pdma_ethical.yml`, v3.0
+  polyglot torque-framed) — principle evaluation is the surface where
+  single-frame attractor capture would route around the framework.
+- **OptimizationVetoConscience** (`ciris_engine/logic/conscience/prompts
+  /optimization_veto_conscience.yml`, v3.0 polyglot) —
+  entropy-reducing-action refusal is where attractor-captured responses
+  get caught regardless of which language the capture was attempted in.
+
+The other six DMAs and three consciences are per-locale. Detector +
+scoring layers that look for cross-language torque inversion read these
+two surfaces; surfacing the same signal from per-locale prompts is a
+category error (CIRISLensCore#6).
+
 ### `scoring/` (WHAT)
 
 **Mission:** convert detector outputs into the federation's signal
