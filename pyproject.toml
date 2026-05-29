@@ -42,7 +42,7 @@ classifiers = [
 # v1.11.0's Engine::receive_and_persist ingest facade (#89) — the
 # primitives CIRISLensCore#10's relay handler builds on. v2.0.x +
 # v2.1.0 added iOS/Android cross-compile + #101 federation_
-# announcement / delivery_attestation substrate. verify v3.0.1
+# announcement / delivery_attestation substrate. verify v4.0.0
 # (MAJOR from v2.x) is transitive via persist + edge — single
 # version across the federation tree.
 #
