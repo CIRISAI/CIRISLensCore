@@ -30,6 +30,10 @@
 
 use ciris_persist::pipeline::extract::Features;
 
+pub mod coherence_ratchet;
+
+pub use coherence_ratchet::CoherenceRatchetDetector;
+
 /// Per-trace detection outcome from the detector stage. Maps to an
 /// [`AssemblyInput`][ai] variant in the orchestrator.
 ///

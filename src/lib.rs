@@ -89,6 +89,7 @@ pub use capacity::{
     AntiGoodhartViolation, CapacityAttestation, CapacityFactorError, CapacityFactors,
 };
 pub use config::{EgressFilter, RetentionPolicy, UpstreamLens};
+pub use detector::CoherenceRatchetDetector;
 pub use pipeline::lifecycle::{LensCore, Outcome};
 pub use retention::{evict_per_retention_policy, EvictionError, EvictionPlan, EvictionSummary};
 pub use role::{LensCoreHandler, RelayError, RelayHandle};
