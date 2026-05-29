@@ -29,5 +29,7 @@
 //! #25 / CEG §5.5.4) layers the five-factor calculation on top.
 
 pub mod attestation;
+pub mod score;
 
 pub use attestation::{AntiGoodhartViolation, CapacityAttestation};
+pub use score::{CapacityFactorError, CapacityFactors};
