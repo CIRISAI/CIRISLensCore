@@ -76,6 +76,18 @@ ignore = [
     "RUSTSEC-2026-0098",  # rustls-webpki URI-name constraint (no URI SAN validation here)
     "RUSTSEC-2026-0099",  # rustls-webpki wildcard-DNS constraint (no name-constraint certs)
     "RUSTSEC-2026-0104",  # rustls-webpki CRL parse panic (no CRL parsing here)
+
+    # `unic-*` family unmaintained.
+    # Transitive: edge v0.13.0+ → uniffi → rustpython-parser → unic-*.
+    # No CLI / parser exposure on lens-core's hot path; UniFFI may
+    # rewire away from rustpython-parser, in which case these auto-
+    # disappear.
+    "RUSTSEC-2025-0075",
+    "RUSTSEC-2025-0080",
+    "RUSTSEC-2025-0081",
+    "RUSTSEC-2025-0090",
+    "RUSTSEC-2025-0098",
+    "RUSTSEC-2025-0100",
 ]
 
 [sources]

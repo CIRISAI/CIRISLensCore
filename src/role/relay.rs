@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -85,8 +85,16 @@ impl LensCore {
         // Transport-signing identity. Edge's `LocalSigner` is
         // keyring-trait-object based, distinct from persist's
         // raw-seed `LocalSigner`; the relay loads its own via
-        // keyring. See `load_edge_signer`.
-        let signer = Arc::new(load_edge_signer(&key_id, &seed_dir).await?);
+        // edge's standalone seed-dir constructor (CIRISEdge#13,
+        // shipped edge v0.10.0+). Same seed-layout convention edge's
+        // own `EdgeBuilder::from_keyring_seed_dir` uses; handles
+        // the v0.11+ `ratchet_id` + `last_rotation_at` fields
+        // internally.
+        let signer = Arc::new(
+            LocalSigner::from_keyring_seed_dir(&key_id, seed_dir.clone())
+                .await
+                .map_err(|e| RelayError::Signer(e.to_string()))?,
+        );
 
         let transport = Arc::new(HttpTransport::new(HttpTransportConfig {
             listen_addr,
@@ -131,45 +139,6 @@ impl LensCore {
         edge.register_handler::<AccordEventsBatch, _>(LensCoreHandler::new(engine))
             .await
     }
-}
-
-/// Load an Edge [`LocalSigner`] from a seed directory via
-/// `ciris_keyring::load_local_seed`.
-///
-/// This mirrors the seed-loading half of Edge's own
-/// `EdgeBuilder::from_keyring_seed_dir` — lens-core can't call that
-/// directly because it *also* opens a fresh `FederationDirectory` /
-/// `OutboundQueue` from a `db_path`, whereas relay mode shares the
-/// host Engine's backend instead (cohabitation).
-///
-/// FOLLOW-UP (CIRISEdge): if Edge extracts a standalone
-/// `LocalSigner::from_keyring_seed_dir`, this helper collapses to one
-/// call and the seed-layout convention stops being duplicated here.
-/// Non-blocking cleanup.
-async fn load_edge_signer(key_id: &str, seed_dir: &Path) -> Result<LocalSigner, RelayError> {
-    let pqc_seed = seed_dir.join("ml_dsa_65.seed");
-    let (pqc_key_id, pqc_key_path) = if pqc_seed.exists() {
-        (Some(format!("{key_id}-pqc")), Some(pqc_seed))
-    } else {
-        (None, None)
-    };
-
-    let config = ciris_keyring::LocalSeedConfig {
-        key_id: key_id.to_string(),
-        key_path: seed_dir.join("ed25519.seed"),
-        pqc_key_id,
-        pqc_key_path,
-    };
-
-    let (classical, pqc) = ciris_keyring::load_local_seed(config)
-        .await
-        .map_err(|e| RelayError::Signer(e.to_string()))?;
-
-    Ok(LocalSigner {
-        key_id: key_id.to_string(),
-        classical,
-        pqc,
-    })
 }
 
 /// Handle to a running relay-mode Edge runtime.
@@ -249,29 +218,8 @@ mod tests {
         );
     }
 
-    // `ciris_edge::LocalSigner` holds `Arc<dyn HardwareSigner>` trait
-    // objects and is not `Debug`, so the `Ok` arm can't go through
-    // `expect_err`/`unwrap_err` — match the `Result` directly.
-
-    #[tokio::test]
-    async fn load_edge_signer_errors_on_missing_seed_dir() {
-        // No ed25519.seed at this path — keyring's load fails and the
-        // error surfaces as RelayError::Signer rather than panicking.
-        let result = load_edge_signer("relay-test", Path::new("/nonexistent/ciris/seeds")).await;
-        assert!(
-            matches!(result, Err(RelayError::Signer(_))),
-            "missing seed dir must surface RelayError::Signer",
-        );
-    }
-
-    #[tokio::test]
-    async fn load_edge_signer_skips_pqc_when_seed_absent() {
-        // A seed dir with no ml_dsa_65.seed must not fault on PQC —
-        // it degrades to classical-only (pqc_key_path = None). The
-        // classical seed is still absent here, so the call errors at
-        // the ed25519 load; the point is it reaches that far without
-        // a PQC-related panic.
-        let result = load_edge_signer("relay-test", Path::new("/nonexistent")).await;
-        assert!(matches!(result, Err(RelayError::Signer(_))));
-    }
+    // Seed-load error-handling tests removed — that behavior now
+    // belongs to edge's standalone `LocalSigner::from_keyring_seed_dir`
+    // (CIRISEdge#13, shipped edge v0.10.0+). lens-core only forwards
+    // the seed-dir path and maps the error to `RelayError::Signer`.
 }
