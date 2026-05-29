@@ -67,6 +67,7 @@
 // kicks off. Each module's mission is documented in MISSION.md §2;
 // this file just declares the scope.
 
+pub mod capacity;
 pub mod cohort;
 pub mod config;
 pub mod detector;
@@ -84,6 +85,7 @@ pub mod wire;
 // today; agent post-fold) consumes. Stable across patch versions;
 // changes require a deprecation window.
 
+pub use capacity::{AntiGoodhartViolation, CapacityAttestation};
 pub use config::{EgressFilter, RetentionPolicy, UpstreamLens};
 pub use pipeline::lifecycle::{LensCore, Outcome};
 pub use retention::{evict_per_retention_policy, EvictionError, EvictionPlan, EvictionSummary};

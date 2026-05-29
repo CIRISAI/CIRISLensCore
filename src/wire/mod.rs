@@ -49,6 +49,20 @@ pub use ciris_persist::schema::events::{
     AuditAnchor, ComponentType, CostSummary, LlmCallStatus, LlmCallSummary, ReasoningEventType,
 };
 
+// ── Goal primitive (CIRISPersist#114, persist v2.10.0) ──
+//
+// CEG §5.5 + §11.2.1 — typed Goal across the federation, with M-1
+// alignment as a structural construction-time invariant. Lens-core's
+// F-3 detector family (CIRISLensCore#23 / #24 / #26 / #27) operates
+// on the aggregate of declared goals; re-exporting here keeps the
+// federation-public ABI for goal-shaped data centralized under
+// `crate::wire::*`. M1Dimension is the closed enum that forces
+// declarers to think within the Accord's M-1 framing rather than
+// slap arbitrary rationale.
+pub use ciris_persist::federation::goal::{
+    DeliberationRef, Goal, GoalScope, GoalsFilter, M1Dimension, MetaGoalAlignment,
+};
+
 // ── lens-core's typed signer wrapper ──
 
 pub mod signer;
@@ -98,6 +112,11 @@ mod tests {
         fn _accepts_complete_trace(_t: &CompleteTrace) {}
         fn _accepts_trace_component(_c: &TraceComponent) {}
         fn _accepts_deployment_profile(_d: &DeploymentProfile) {}
+        fn _accepts_goal(_g: &Goal) {}
+        fn _accepts_meta_goal_alignment(_a: &MetaGoalAlignment) {}
+        fn _accepts_m1_dimension(_d: M1Dimension) {}
+        fn _accepts_goal_scope(_s: &GoalScope) {}
+        fn _accepts_goals_filter(_f: &GoalsFilter) {}
         fn _accepts_trace_level(_l: TraceLevel) {}
         fn _accepts_reasoning_event_type(_e: &ReasoningEventType) {}
         fn _accepts_correlation_metadata(_m: &CorrelationMetadata) {}
