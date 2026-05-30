@@ -26,7 +26,7 @@ classifiers = [
 # console scripts). Deployed lens + agent get one install command for
 # the whole lens+persist+verify stack.
 #
-# EXACT pin to v3.1.1 — the CIRIS 3.0 in-process cohabitation
+# EXACT pin to v3.6.4 — the CIRIS 3.0 in-process cohabitation
 # convergence pin (CIRISLensCore#22). For agent + NodeCore + LensCore
 # co-resident in one process, every consumer must link ONE identical
 # ciris-persist: a single tokio runtime, a single process-singleton
@@ -34,15 +34,15 @@ classifiers = [
 # different patch than NodeCore/agent and break the singleton.
 # Exact `==` is the contract.
 #
-# v3.1.1 is the live CIRIS 3.0 cohabitation convergence point:
-# CIRISEdge v0.13.1 already moved here (persist v3.1.1 + verify
+# v3.6.4 is the live CIRIS 3.0 cohabitation convergence point:
+# CIRISEdge v1.0.2 already moved here (persist v3.6.4 + verify
 # v3.0.1); CIRISNodeCore + CIRISAgent re-target the identical
-# v3.1.1. Persist v2.0.0 "Federation Ready" (#95 cohabitation
+# v3.6.4. Persist v2.0.0 "Federation Ready" (#95 cohabitation
 # accessors — closes #92, unblocks CIRISLensCore#10 PyO3 half) +
 # v1.11.0's Engine::receive_and_persist ingest facade (#89) — the
 # primitives CIRISLensCore#10's relay handler builds on. v2.0.x +
 # v2.1.0 added iOS/Android cross-compile + #101 federation_
-# announcement / delivery_attestation substrate. verify v4.0.0
+# announcement / delivery_attestation substrate. verify v4.4.2
 # (MAJOR from v2.x) is transitive via persist + edge — single
 # version across the federation tree.
 #
@@ -55,7 +55,7 @@ classifiers = [
 # Lens-core's CI installs `libtss2-dev` on its Linux jobs (mirrors
 # CIRISEdge#12). Re-pin in lockstep with edge + NodeCore + agent.
 dependencies = [
-    "ciris-persist==3.1.1",
+    "ciris-persist==3.6.4",
 ]
 dynamic = ["version"]
 
