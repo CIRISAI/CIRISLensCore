@@ -33,7 +33,7 @@ ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v1.1.3
 # `LocalSigner` is keyring-trait-object based (Arc<dyn HardwareSigner>
 # + Arc<dyn PqcSigner>), distinct from persist's raw-seed LocalSigner;
 # the two are not interchangeable, so the relay loads its own. Same
-# CIRISVerify tag persist + edge pin (v4.4.2) — single verify version.
+# CIRISVerify tag persist + edge pin (v4.4.3) — single verify version.
 # features mirror edge's keyring pin exactly.
 ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v4.4.3", version = "4", features = ["software", "pqc-ml-dsa"] }
 
