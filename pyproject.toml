@@ -34,17 +34,27 @@ classifiers = [
 # different patch than NodeCore/agent and break the singleton.
 # Exact `==` is the contract.
 #
-# v3.6.9 is the live CIRIS 3.0 cohabitation convergence point:
-# CIRISEdge v1.1.3 already moved here (persist v3.6.9 + verify
-# v3.0.1); CIRISNodeCore + CIRISAgent re-target the identical
-# v3.6.9. Persist v2.0.0 "Federation Ready" (#95 cohabitation
-# accessors — closes #92, unblocks CIRISLensCore#10 PyO3 half) +
-# v1.11.0's Engine::receive_and_persist ingest facade (#89) — the
-# primitives CIRISLensCore#10's relay handler builds on. v2.0.x +
-# v2.1.0 added iOS/Android cross-compile + #101 federation_
-# announcement / delivery_attestation substrate. verify v4.4.3
-# (MAJOR from v2.x) is transitive via persist + edge — single
-# version across the federation tree.
+# v3.6.9 is lens-core's embedded-cdylib cohabitation point. NOTE:
+# the federation's canonical *wheel* triple (CIRISConformance
+# matrices/current.yaml) has advanced to persist 3.7.0 / verify
+# 4.6.0 / edge 1.1.4, and edge's own Python persist pin is the range
+# `>=3.6.3,<4` so its wheel cohabits a persist-3.7.0 process at
+# runtime. lens-core's cdylib still statically links persist v3.6.9
+# (Cargo.toml — gated by edge v1.1.4's Rust deps, which trail at
+# persist v3.6.9 + verify v4.4.3), so the in-process EXACT pin must
+# match what the cdylib embeds: declaring `==3.7.0` here while the
+# cdylib carries 3.6.9 would force TWO persist cdylibs into one
+# process and break the single-Engine invariant. This advances to
+# 3.7.0 in lockstep with the Cargo bump, once CIRISEdge re-converges.
+# CIRISEdge v1.1.4 closes CIRISEdge#56 (published wheel built WITH
+# transport-http) — relevant to lens-core's edge wheel consumers but
+# not a Rust-source change vs v1.1.3.
+#
+# Persist v2.0.0 "Federation Ready" (#95 cohabitation accessors —
+# closes #92, unblocks CIRISLensCore#10 PyO3 half) + v1.11.0's
+# Engine::receive_and_persist ingest facade (#89) are the primitives
+# CIRISLensCore#10's relay handler builds on. verify v4.4.3 is
+# transitive via persist + edge — single version across the tree.
 #
 # DEPLOYMENT NOTE — libtss2: persist v1.10.0 (CIRISPersist#87)
 # auto-enables ciris-keyring's `tpm` feature for Linux targets;

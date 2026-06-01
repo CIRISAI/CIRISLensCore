@@ -25,8 +25,26 @@ crate-type = ["cdylib", "rlib"]
 #
 # OQ-01 closure 2026-05-03: rlib primary, PyO3 cdylib via `python`
 # feature for the deployed-lens cutover.
+#
+# Substrate-triple note (CIRISConformance matrices/current.yaml):
+# the federation's canonical *wheel* cohabitation triple is now
+# persist 3.7.0 / verify 4.6.0 / edge 1.1.4. Those are independently-
+# compiled cdylibs that share the host Engine via PyCapsule at
+# runtime (edge's Python persist pin is the range `>=3.6.3,<4`).
+# lens-core's relay path links persist + edge as *rlibs* in ONE
+# binary and hands `Arc<SqliteBackend>` into `Edge::builder()`, so it
+# needs a single persist type identity — and edge v1.1.4 STILL pins
+# persist v3.6.9 + verify v4.4.3 at the Rust-source level (v1.1.4 vs
+# v1.1.3 differ only in the published-wheel transport-http build
+# flag; their Cargo ciris-* pins are byte-identical). lens-core
+# therefore holds persist v3.6.9 + verify v4.4.3 here and takes only
+# the edge v1.1.3 → v1.1.4 bump; it re-converges onto persist v3.7.0
+# + verify v4.6.0 the moment CIRISEdge cuts a release re-pinning its
+# own Rust deps to that pair. Bumping persist/verify ahead of edge
+# duplicates the crate in the graph and breaks the relay's
+# SqliteBackend → VerifyDirectory/OutboundHandle coercion.
 ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v3.6.9", version = "3", features = ["extract", "sqlite"] }
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v1.1.3", version = "1", features = ["transport-http"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v1.1.4", version = "1", features = ["transport-http"] }
 
 # Keyring — relay mode (CIRISLensCore#10) loads its Edge transport-
 # signing identity via `ciris_keyring::load_local_seed`. Edge's
