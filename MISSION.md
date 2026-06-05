@@ -167,19 +167,29 @@ catches individual deviation, §5.5.3 catches coordinated compliance,
 CIRIS-RED-incubated until calibration validates against red-team
 fixtures; the framework is public, the operating point isn't.
 
-> **Pre-RATCHET interim.** §5.5.1 detectors ship operational in v0.2.x
-> (closed-enum surface + wire-label discipline land at the type
-> system). §5.5.3 (F-3) + §5.5.5 (distributive-access) are **wire-
-> format reserved only** in v0.2.x — the CEG slot is acknowledged in
-> `src/wire/mod.rs` but no detector implementation exists; the
-> schema-and-signature land is tracked under CIRISLensCore#23 / #24 /
-> #26 / #27 and gates on the CIRISAI/RATCHET calibration package per
-> CEG §11.2.1. When the schema lands, the detectors ship
-> `Indeterminate { reason: "pre_ratchet_calibration" }` only — never
-> numeric verdicts on the open-vocab axes until RATCHET ships. This
-> is the §0.2 CCC posture's honest answer: the substrate is ready;
-> the operating points aren't, and fabricating them would be exactly
-> the failure mode anti-pattern #2 names.
+> **Per-axis-family calibration status.** RATCHET's `crc-v1` bundle
+> shipped 2026-05-13 (`CIRISAI/RATCHET/release/calibration/crc-v1/`)
+> and covers CEG §5.5.1 — the 16-field manifold projection
+> (`projection_version: crc-v1`, matching lens-core's
+> `PROJECTION_VERSION` constant), per-field imputation +
+> standardization, per-cohort centroids, and a provisional global
+> Mahalanobis threshold of 2.5σ. Consumption is CIRISLensCore#3
+> (still open as of v0.2.x); persist v0.4.3 already ships the
+> `calibration_bundles` table + `Engine.put_calibration_bundle()` API.
+>
+> §5.5.3 (F-3) + §5.5.5 (distributive-access) are NOT covered by
+> `crc-v1`. Their schema lands in lens-core v0.3 (`CorrelatedActionAxis`
+> open-vocab enum + `DistributiveAccessResource` closed enum + scorers
+> returning `Indeterminate { reason: AxisAwaitingCalibration { family } }`);
+> their per-axis operational definitions + statistical floors +
+> threshold functions land in a follow-up RATCHET release that extends
+> the calibration package to these axis families. Until then, scoring
+> these prefixes returns the `AxisAwaitingCalibration` variant for all
+> inputs. CIRISLensCore#23 / #24 / #26 / #27 track the v0.5+ detector-
+> body implementation. This is the §0.2 CCC posture's honest answer:
+> the substrate is ready; the per-family operating points aren't yet,
+> and fabricating them would be exactly the failure mode anti-pattern
+> #2 names.
 
 **Anti-pattern that violates mission:** "One global threshold, simple."
 A single threshold is a single attack surface. Per-cohort thresholds
@@ -345,19 +355,21 @@ Patterns that have repeatedly failed at sister crates and that
    the wire. This is structurally distinct from "you can score
    yourself badly" — you can't score yourself *at all* on this
    prefix; only third parties' attestations compose into your 𝒞_CIRIS.
-9. **Open-vocab F-3 / distributive axes scored before RATCHET.**
-   §5.5.3 `detection:correlated_action:{axis}` and §5.5.5
-   `detection:distributive:access:{resource_type}` are open vocab
-   *requiring* operational definitions in the CIRISAI/RATCHET
-   calibration package per CEG §11.2.1. Emitting a numeric verdict
-   on these prefixes before RATCHET ships is anti-pattern #2
-   (continuous-numeric scores where sample size doesn't justify
-   them) plus a CEG §11.2 governance violation: shipping a wire
-   shape whose operating point was never debated in the calibration
-   workshop. v0.2.x reserves the wire slot only (no detector
-   implementation); when the schema-and-signature land (per
-   CIRISLensCore#23 / #24 / #26 / #27) they ship `Indeterminate
-   { reason: "pre_ratchet_calibration" }` only.
+9. **Open-vocab F-3 / distributive axes scored before the per-axis
+   calibration extension lands.** §5.5.3 `detection:correlated_action:
+   {axis}` and §5.5.5 `detection:distributive:access:{resource_type}`
+   are *not* covered by RATCHET's shipped `crc-v1` bundle (which
+   covers §5.5.1 manifold-projection only). Each requires per-axis
+   operational definitions + statistical floors + threshold functions
+   in a follow-up RATCHET release per CEG §11.2.1. Emitting a numeric
+   verdict on these prefixes before that extension ships is anti-
+   pattern #2 (continuous-numeric scores where sample size doesn't
+   justify them) plus a CEG §11.2 governance violation: shipping a
+   wire shape whose operating point was never debated in the
+   calibration workshop. Scorers ship `Indeterminate { reason:
+   AxisAwaitingCalibration { family } }` (where `family` is
+   `F3CorrelatedAction` or `DistributiveAccess`) until the calibration
+   extension lands.
 
 ## 4. Test categories — every test answers a mission question
 
@@ -373,7 +385,7 @@ Patterns that have repeatedly failed at sister crates and that
 | **Capacity-Score self-emission rejection (CEG §7.5)** | Does `attesting_key_id == attested_key_id` on a `capacity:*` envelope refuse to construct / deserialize? | Property test: `CapacityAttestation::new(k, k, _)` returns `Err`; `serde_json::from_str` of a wire envelope with matching ids fails before reaching the handler |
 | **𝒞_CIRIS multiplicative integrity (CEG §5.5.4)** | Does any one factor at zero force composite to zero? | Property test: for random `(C, I_int, R, I_inc, S)` with at least one set to 0.0, assert `composite == 0.0`; for all in (0.0, 1.0] assert composite > 0.0 |
 | **Coherence-Ratchet closed-enum lock (CEG §5.5.1)** | Does adding a sixth detector require source modification of the enum (not config)? | Compile-time test: `CoherenceRatchetDetector::ALL.len() == 5`; `wire_label_exactness` test pins the five labels |
-| **Pre-RATCHET F-3 / distributive return Indeterminate** | Do §5.5.3 + §5.5.5 detectors emit numeric verdicts before RATCHET ships? | (v0.2.x: no detector implementation; CEG slot reserved only.) Property test gated by CIRISLensCore#23 / #24 / #26 / #27: when the schema lands, any input returns `Indeterminate { reason: "pre_ratchet_calibration" }`. |
+| **F-3 / distributive return AxisAwaitingCalibration** | Do §5.5.3 + §5.5.5 detectors emit numeric verdicts before per-axis RATCHET extension ships? | Property test: any input to `detector::correlated_action::score` returns `Indeterminate { reason: AxisAwaitingCalibration { family: F3CorrelatedAction } }`; same shape for `detector::distributive_access::score` with `family: DistributiveAccess`. |
 
 A PR that adds detection without adding the test that answers its
 mission question gets sent back. Same MDD review discipline persist
@@ -429,7 +441,7 @@ Same single-source-of-truth discipline persist set with
 | Detection events silently dropped on persist failure | Federation evidence loss | Best-effort retry queue; never silent drop; alerting on retry-queue depth |
 | Cross-version detection drift unannounced | LC-AV-19 federation-signal noise | `lens_core_version` on every event; per-version aggregation gates |
 | Capacity-Score self-emission accepted at the wire | CEG §7.5 anti-Goodhart bypass; agent feeds own capacity back into own context | `CapacityAttestation` construction-time invariant + `Deserialize` re-validation; conformance test asserts both rejection paths |
-| F-3 / distributive numeric verdict shipped before RATCHET | CEG §11.2 governance-bypass on the open-vocab axes; calibration workshop never debated the operating point | Scorers gated to `Indeterminate { reason: "pre_ratchet_calibration" }` until RATCHET package lands; integration test asserts only that variant appears |
+| F-3 / distributive numeric verdict shipped before per-axis RATCHET extension | CEG §11.2 governance-bypass on the open-vocab axes; calibration workshop never debated the operating point | Scorers gated to `Indeterminate { reason: AxisAwaitingCalibration { family } }` until the calibration extension lands; integration test asserts only that variant appears |
 | Coherence-Ratchet detector added via config (not source) | CEG §5.5.1 closed-enum lock bypass; wire-label drift across federation | `CoherenceRatchetDetector` is a closed Rust enum; new variant requires source change + recompile + (per §11.2) CEG amendment first |
 
 ## 8. Closing note

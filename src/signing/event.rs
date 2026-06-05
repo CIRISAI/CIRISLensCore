@@ -290,6 +290,18 @@ fn indeterminate_payload(reason: &IndeterminateReason) -> Value {
         IndeterminateReason::InferredCohortAmbiguous => {
             json!({ "reason": "inferred_cohort_ambiguous" })
         }
+        IndeterminateReason::AxisAwaitingCalibration { family } => json!({
+            "reason": "axis_awaiting_calibration",
+            "family": axis_family_str(*family),
+        }),
+    }
+}
+
+fn axis_family_str(t: crate::scoring::result::AxisFamily) -> &'static str {
+    use crate::scoring::result::AxisFamily::*;
+    match t {
+        F3CorrelatedAction => "f3_correlated_action",
+        DistributiveAccess => "distributive_access",
     }
 }
 

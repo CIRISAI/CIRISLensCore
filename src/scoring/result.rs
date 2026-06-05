@@ -51,6 +51,60 @@ pub enum IndeterminateReason {
     SampleSizeBelowGate { current: u32, gate: u32 },
     /// Inferred-cohort classifier cannot disambiguate (LC-AV-2 edge case).
     InferredCohortAmbiguous,
+    /// CEG §11.2.1 per-axis-family calibration gate.
+    ///
+    /// **RATCHET's `crc-v1` shipped 2026-05-13** and covers CEG §5.5.1
+    /// (manifold conformity + 16-field projection — see
+    /// [reference_ratchet_calibration.md][m] in auto-memory). What it
+    /// does NOT cover is the per-axis operational definitions +
+    /// statistical floors + threshold functions for CEG §5.5.3 F-3
+    /// (`detection:correlated_action:{axis}`) and CEG §5.5.5
+    /// distributive-access (`detection:distributive:access:{resource_type}`).
+    /// Those axis families need a follow-up RATCHET release that
+    /// extends the calibration package to cover them; until then the
+    /// detector returns this variant for all inputs.
+    ///
+    /// [m]: ../../../memory/reference_ratchet_calibration.md
+    ///
+    /// **Why this is `Indeterminate` not `Unavailable`:** the substrate
+    /// is healthy, the corpus is present, the score function isn't
+    /// broken — the operational meaning of the score on these specific
+    /// axis families is what's missing. That's exactly the LC-AV-18 /
+    /// anti-pattern #2 shape (don't fabricate numerics when
+    /// sample-size / spec doesn't justify them) plus a CEG §11.2
+    /// governance lock — the calibration workshop hasn't shipped the
+    /// per-axis operating point yet. MISSION.md §3 anti-pattern #9
+    /// names this discipline.
+    AxisAwaitingCalibration {
+        /// Which CEG §5.5.x axis family is awaiting calibration.
+        /// Stamped into the emitted envelope's `evidence_refs` so
+        /// consumers can distinguish "F-3 axes uncalibrated" from
+        /// "distributive-access uncalibrated" — distinct gaps in the
+        /// RATCHET roadmap, distinct follow-on calibration workshops.
+        family: AxisFamily,
+    },
+}
+
+/// Names which CEG §5.5.x axis family is awaiting per-axis calibration
+/// extension by RATCHET. Closed enum — every variant maps to a CEG
+/// §5.5.x sub-section whose axis vocabulary isn't covered by the
+/// currently-shipped calibration package (`crc-v1` as of writing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxisFamily {
+    /// CEG §5.5.3 — `detection:correlated_action:{axis}`. Open-vocab
+    /// axis vocabulary; calibration package owns the per-axis
+    /// operational definition, statistical floor, threshold function.
+    /// Historical name (pre-CEG): `detection:emergent_deception:{axis}`
+    /// per FSD-002 v1.1; the rename will land as a CEG §6
+    /// `delegates_to` chain (`correlated_action_v{N+1}:from:
+    /// emergent_deception_v{N}`) at the same release that ships the
+    /// first calibrated operating point.
+    F3CorrelatedAction,
+    /// CEG §5.5.5 — `detection:distributive:access:{resource_type}`.
+    /// Closed resource-type vocabulary (see `DistributiveAccessResource`
+    /// in `src/detector/distributive_access.rs`); calibration package
+    /// owns the per-resource Gini / HHI / cohort-size-floor spec.
+    DistributiveAccess,
 }
 
 #[derive(Debug, Clone)]

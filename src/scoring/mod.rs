@@ -11,5 +11,6 @@ pub use assembly::{assemble, AssemblyInput};
 pub use capacity::capacity;
 pub use n_eff::kish_n_eff;
 pub use result::{
-    DetectionEvent, IndeterminateReason, ManifoldConformity, Score, Severity, UnavailableReason,
+    AxisFamily, DetectionEvent, IndeterminateReason, ManifoldConformity, Score, Severity,
+    UnavailableReason,
 };
