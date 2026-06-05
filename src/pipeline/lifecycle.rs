@@ -33,12 +33,20 @@
 //!
 //! - Detector stage is no-op (returns
 //!   [`DetectionResult::None`][crate::detector::DetectionResult::None])
-//!   so every trace lands in
-//!   [`AssemblyInput::CohortColdStart`][crate::scoring::AssemblyInput::CohortColdStart]
-//!   → `Indeterminate { CohortColdStart }`. Architecturally correct
-//!   during the LC-AV-9 cold-start window — RATCHET's calibration
-//!   bundle (CIRISLensCore#3) lands the real centroids and Phase 2
-//!   replaces detector with real implementations.
+//!   so v0.1.0 traces route through bundle-aware fallback only.
+//! - **CIRISLensCore#3 partial closure (2026-05-13).** RATCHET shipped
+//!   the `crc-v1` calibration bundle; lens-core consumes it via
+//!   [`LensCore::with_calibration_bundle`]. Bundle-aware routing:
+//!   cohort not in the centroid table →
+//!   [`AssemblyInput::CohortColdStart`][crate::scoring::AssemblyInput::CohortColdStart];
+//!   cohort below `sample_size_gate` →
+//!   [`AssemblyInput::BundleSampleBelowGate`][crate::scoring::AssemblyInput::BundleSampleBelowGate]
+//!   → `Indeterminate { SampleSizeBelowGate }`. Every cohort cell in
+//!   `crc-v1` is below the 500-sample gate (119 / 90 / 55), so every
+//!   trace still returns `Indeterminate` — but with a different,
+//!   sharper reason than the pre-bundle blanket cold-start. Phase 2
+//!   replaces the no-op detector with the real implementations, at
+//!   which point above-gate cohorts return numeric scores.
 //! - SLO budget enforcement (LC-AV-11
 //!   [`ManifoldConformity::Unavailable`]) is **not** wired in this
 //!   commit; lifecycle is currently best-effort. Production
@@ -55,6 +63,7 @@ use serde_json::Value;
 
 use crate::cohort;
 use crate::detector::{detect, DetectionResult};
+use crate::scoring::calibration::CalibrationBundle;
 use crate::scoring::result::{IndeterminateReason, ManifoldConformity, Score, Severity};
 use crate::scoring::{assemble, AssemblyInput};
 use crate::signing::{sign_detection, DetectionInputs, SigningError};
@@ -73,14 +82,47 @@ pub struct LensCore {
     signer: Arc<LocalSigner>,
     #[allow(dead_code)]
     journal: Arc<Journal>,
+    /// Optional RATCHET-shipped calibration bundle. `None` ≡
+    /// pre-CIRISLensCore#3 cold-start: every trace routes through
+    /// [`AssemblyInput::CohortColdStart`]. `Some` ≡ post-#3: the
+    /// bundle drives cohort lookup, and lifecycle returns
+    /// `Indeterminate { SampleSizeBelowGate }` for cohorts below the
+    /// bundle's `sample_size_gate` (every cohort in `crc-v1`).
+    bundle: Option<Arc<CalibrationBundle>>,
 }
 
 impl LensCore {
     /// Construct a `LensCore` from substrate handles. Both must be
     /// shared (`Arc`) because the orchestrator may be invoked from
     /// multiple worker threads in the deployed lens.
+    ///
+    /// Constructed without a calibration bundle; every trace lands
+    /// in `Indeterminate { CohortColdStart }`. Use
+    /// [`LensCore::with_calibration_bundle`] to hydrate a
+    /// RATCHET-shipped bundle.
     pub fn new(signer: Arc<LocalSigner>, journal: Arc<Journal>) -> Self {
-        Self { signer, journal }
+        Self {
+            signer,
+            journal,
+            bundle: None,
+        }
+    }
+
+    /// Attach a RATCHET-shipped calibration bundle. Consumes the
+    /// `LensCore` and returns the bundle-hydrated form — builder-style
+    /// to keep the no-bundle constructor backwards-compatible for
+    /// existing callers (`LensCoreHandler::new(engine)`, relay-mode
+    /// tests).
+    pub fn with_calibration_bundle(mut self, bundle: Arc<CalibrationBundle>) -> Self {
+        self.bundle = Some(bundle);
+        self
+    }
+
+    /// Borrow the hydrated calibration bundle, if any. Used by
+    /// downstream observability + tests; the hot-path `process`
+    /// dispatches on `self.bundle` directly.
+    pub fn calibration_bundle(&self) -> Option<&Arc<CalibrationBundle>> {
+        self.bundle.as_ref()
     }
 
     /// Process one [`VerifiedTrace`] through the science-layer
@@ -88,10 +130,27 @@ impl LensCore {
     /// (write event to persist via `DerivedSchema::put_detection_event`,
     /// surface score via API, etc.).
     ///
-    /// `sample_size_gate` and `ratchet_calibration_version` come from
-    /// the calibration bundle the caller loaded at startup. In v0.1.0
-    /// (no calibration bundle yet) the detector returns `None` and
-    /// the gate is unused — every trace produces Indeterminate.
+    /// `sample_size_gate` and `ratchet_calibration_version` are
+    /// caller-supplied defaults used when no calibration bundle has
+    /// been hydrated on this `LensCore`. When
+    /// [`with_calibration_bundle`][Self::with_calibration_bundle]
+    /// was called, the bundle's own values override the arguments —
+    /// LC-AV-19 reproducibility ties detection events to the bundle
+    /// that scored them, not the call-site default.
+    ///
+    /// # Bundle-aware routing (post-CIRISLensCore#3)
+    ///
+    /// - **No bundle hydrated:** every trace lands in
+    ///   `Indeterminate { CohortColdStart }` (pre-#3 behavior).
+    /// - **Bundle hydrated, cohort not in centroid table:**
+    ///   `Indeterminate { CohortColdStart }` (still cold-start, just
+    ///   for this specific cohort).
+    /// - **Bundle hydrated, cohort below `sample_size_gate`:**
+    ///   `Indeterminate { SampleSizeBelowGate { current, gate } }` —
+    ///   different reason, same fail-secure shape.
+    /// - **Bundle hydrated, cohort at-or-above gate:** detector body
+    ///   runs (Phase 2 will land that); for now still cold-start
+    ///   because the v0.1.0 detector is a no-op.
     pub async fn process(
         &self,
         trace: VerifiedTrace,
@@ -120,9 +179,22 @@ impl LensCore {
         // 5. Detector → DetectionResult. v0.1.0 no-op: None.
         let detection = detect(&features);
 
-        // 6. Convert detection outcome to assembly input.
+        // 6. Resolve the calibration-derived inputs. When a bundle is
+        // hydrated, its `sample_size_gate` and
+        // `ratchet_calibration_version` override the caller-supplied
+        // defaults — the bundle is authoritative once present.
+        let (effective_gate, effective_version) = match self.bundle.as_deref() {
+            Some(b) => (b.sample_size_gate, b.ratchet_calibration_version),
+            None => (sample_size_gate, ratchet_calibration_version),
+        };
+
+        // 7. Convert detection outcome to assembly input. The bundle
+        // lookup informs the cold-start vs. sample-below-gate fork
+        // when the detector hasn't produced a Mahalanobis distance.
         let assembly_input = match detection {
-            DetectionResult::None => AssemblyInput::CohortColdStart,
+            DetectionResult::None => {
+                assembly_input_from_bundle(self.bundle.as_deref(), &cohort_cell)
+            }
             DetectionResult::Manifold {
                 mahalanobis,
                 cohort_sample_count,
@@ -133,10 +205,13 @@ impl LensCore {
             DetectionResult::DeclaredInferredMismatch { .. } => AssemblyInput::AmbiguousCohort,
         };
 
-        // 7. LC-AV-18 gate — produces ManifoldConformity.
-        let conformity = assemble(assembly_input, sample_size_gate);
+        // 8. LC-AV-18 gate — produces ManifoldConformity.
+        let conformity = assemble(assembly_input, effective_gate);
 
-        // 8. Sign the detection event.
+        // 9. Sign the detection event. The
+        // `ratchet_calibration_version` stamp uses the bundle's
+        // version when one is hydrated (LC-AV-19: detection events
+        // reproducibility-tie to the bundle that scored them).
         let inputs = DetectionInputs {
             trace_id: trace_id.clone(),
             body_sha256: trace.body_sha256.to_vec(),
@@ -145,7 +220,7 @@ impl LensCore {
             cohort_cell,
             conformity: &conformity,
             lens_core_version: LENS_CORE_VERSION,
-            ratchet_calibration_version,
+            ratchet_calibration_version: effective_version,
         };
         let (event, summary) = sign_detection(&self.signer, inputs).await?;
 
@@ -185,6 +260,49 @@ pub enum ProcessError {
     /// Signing the detection event failed.
     #[error("sign: {0}")]
     Sign(#[from] SigningError),
+}
+
+/// Decide the assembly input when the detector produced no
+/// detection (the v0.1.0 no-op default).
+///
+/// The fork:
+///
+/// - No bundle hydrated → `CohortColdStart` (pre-#3 cold-start).
+/// - Bundle present, cohort not in `cohort_centroids` →
+///   `CohortColdStart` (this specific cohort hasn't been observed
+///   in calibration corpus).
+/// - Bundle present, cohort sample below gate →
+///   `BundleSampleBelowGate { current, gate }`. Routes through the
+///   same `Indeterminate { SampleSizeBelowGate }` shape as
+///   detector-fired `Scored`-below-gate.
+/// - Bundle present, cohort at-or-above gate → still
+///   `CohortColdStart`. The v0.1.0 detector body hasn't been
+///   implemented, so even when the bundle would let us score we
+///   have no Mahalanobis distance to emit. Phase 2 lands the real
+///   detector, at which point this branch becomes unreachable.
+fn assembly_input_from_bundle(
+    bundle: Option<&CalibrationBundle>,
+    cohort_cell: &Value,
+) -> AssemblyInput {
+    let Some(bundle) = bundle else {
+        return AssemblyInput::CohortColdStart;
+    };
+    let Some(centroid) = bundle.lookup_cohort(cohort_cell) else {
+        return AssemblyInput::CohortColdStart;
+    };
+    let current = u32::try_from(centroid.sample_count).unwrap_or(u32::MAX);
+    if current < bundle.sample_size_gate {
+        AssemblyInput::BundleSampleBelowGate {
+            current,
+            gate: bundle.sample_size_gate,
+        }
+    } else {
+        // Phase 2 detector body lands here; v0.1.0 has no Mahalanobis
+        // to emit so we still route through cold-start. Once the
+        // detector lands, replace this branch with the real
+        // `Scored { mahalanobis, cohort_sample_count: current }`.
+        AssemblyInput::CohortColdStart
+    }
 }
 
 /// Map a [`ManifoldConformity`] to the detection-event severity

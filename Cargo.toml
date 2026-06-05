@@ -51,6 +51,13 @@ pyo3 = { version = "0.28", features = ["extension-module", "abi3-py310"], option
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# YAML — RATCHET's release `bundle.yaml` is the human-readable
+# wire form of `CalibrationBundle` (CIRISLensCore#3). Used by
+# `scoring::calibration::CalibrationBundle::from_yaml` on sovereign-
+# mode startup loaders that ship the bundle next to the binary, and
+# by tests. The persist-row path uses `serde_json` directly.
+serde_yaml = "0.9"
+
 # Crypto (mostly used via persist; lens-core hashes content for
 # provenance preservation post-scrub)
 sha2 = "0.10"

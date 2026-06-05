@@ -3,17 +3,24 @@
 //! # v0.1.0 status
 //!
 //! Ships a **no-op detector** that returns [`DetectionResult::None`]
-//! for every trace. Combined with [`crate::scoring::assemble`] this
-//! routes every v0.1.0 trace through
+//! for every trace. Combined with the bundle-aware lifecycle this
+//! routes every v0.1.0 trace through either
 //! [`crate::scoring::AssemblyInput::CohortColdStart`] →
-//! [`ManifoldConformity::Indeterminate { CohortColdStart }`][ind].
+//! [`ManifoldConformity::Indeterminate { CohortColdStart }`][ind]
+//! (no bundle / cohort missing from bundle) or
+//! [`crate::scoring::AssemblyInput::BundleSampleBelowGate`] →
+//! [`ManifoldConformity::Indeterminate { SampleSizeBelowGate }`][ind]
+//! (bundle present, cohort represented, sample-count below gate).
 //!
 //! That's the architecturally-correct fail-secure behavior per
-//! LC-AV-9 (cold-start window): until RATCHET delivers the
-//! calibration bundle (CIRISLensCore#3) with per-cohort centroids,
-//! no trace can be scored against the manifold, so every trace
-//! reports Indeterminate. Federation acceptance routes through
-//! M1+M2 fallback during this window.
+//! LC-AV-9 (cold-start window) and LC-AV-18 (sample-size gate). The
+//! detector body itself returns Indeterminate **until the Phase 2
+//! detector implementations land** — RATCHET's `crc-v1` calibration
+//! bundle has shipped (CIRISLensCore#3 partial closure 2026-05-13),
+//! but the Mahalanobis scorer that consumes the centroids still
+//! ports from `CIRISLens/api/analysis/coherence_ratchet.py`.
+//! Federation acceptance routes through M1+M2 fallback during this
+//! window.
 //!
 //! # Real detectors (Phase 2)
 //!
@@ -21,10 +28,11 @@
 //! `CIRISLens/api/analysis/coherence_ratchet.py`
 //! (`_detect_cross_agent_divergence_via_persist` + 3 siblings) plus
 //! the manifold-conformity scorer that consumes
-//! [`crate::extract::project`]'s 16-feature output against
-//! RATCHET-shipped centroids. All four detectors compose against
-//! persist v0.7.x §F primitives directly via the rlib path; no
-//! PyO3 hop.
+//! [`crate::extract::project`]'s 16-feature output against the
+//! `crc-v1` centroids hydrated via
+//! [`crate::scoring::CalibrationBundle`]. All four detectors compose
+//! against persist v0.7.x §F primitives directly via the rlib path;
+//! no PyO3 hop.
 //!
 //! [ind]: crate::scoring::ManifoldConformity::Indeterminate
 
@@ -44,11 +52,16 @@ pub use distributive_access::{DistributiveAccessInput, DistributiveAccessResourc
 /// [ai]: crate::scoring::AssemblyInput
 #[derive(Debug, Clone)]
 pub enum DetectionResult {
-    /// No detector flagged — the v0.1.0 default. Orchestrator routes
-    /// to [`AssemblyInput::CohortColdStart`][ccs] (LC-AV-9 cold-start
-    /// window until RATCHET centroids ship via CIRISLensCore#3).
+    /// No detector flagged — the v0.1.0 default. Orchestrator
+    /// routes through the bundle-aware fallback: cohort missing from
+    /// the calibration bundle → [`AssemblyInput::CohortColdStart`][ccs]
+    /// (LC-AV-9 cold-start window); cohort present but below
+    /// `sample_size_gate` →
+    /// [`AssemblyInput::BundleSampleBelowGate`][bs]. This branch
+    /// dominates until the Phase 2 detector body lands.
     ///
     /// [ccs]: crate::scoring::AssemblyInput::CohortColdStart
+    /// [bs]: crate::scoring::AssemblyInput::BundleSampleBelowGate
     None,
 
     /// Manifold-conformity scorer produced a Mahalanobis-σ distance
@@ -75,15 +88,21 @@ pub enum DetectionResult {
     },
 }
 
-/// v0.1.0 no-op detector. Returns [`DetectionResult::None`] for every
-/// trace until RATCHET delivers calibration centroids and Phase 2
-/// lands the real detector implementations.
+/// v0.1.0 no-op detector. Returns [`DetectionResult::None`] for
+/// every trace until the Phase 2 detector body lands.
 ///
 /// This is not laziness — it's the architecturally correct
-/// fail-secure behavior during the LC-AV-9 cold-start window. A
-/// detector that fired without calibrated centroids would emit
-/// fabricated scores; we explicitly refuse and route every trace to
-/// [`crate::scoring::ManifoldConformity::Indeterminate`] instead.
+/// fail-secure behavior. RATCHET's `crc-v1` calibration bundle has
+/// shipped, but the Mahalanobis scorer that consumes those centroids
+/// is still being ported from
+/// `CIRISLens/api/analysis/coherence_ratchet.py`. A detector that
+/// fired without the implemented scoring body would emit fabricated
+/// scores; we explicitly refuse and route every trace through the
+/// bundle-aware fallback in
+/// [`crate::pipeline::lifecycle`] → either
+/// [`crate::scoring::ManifoldConformity::Indeterminate`] with reason
+/// `CohortColdStart` or `SampleSizeBelowGate` depending on whether
+/// the trace's cohort appears in the hydrated bundle.
 pub fn detect(_features: &Features) -> DetectionResult {
     DetectionResult::None
 }
@@ -109,9 +128,10 @@ mod tests {
 
     #[test]
     fn v010_detector_always_returns_none() {
-        // LC-AV-9 cold-start: every trace returns None until
-        // RATCHET delivers centroids. Phase 2 replaces this body
-        // with the real implementations.
+        // v0.1.0 fail-secure: every trace returns None until the
+        // Phase 2 detector body lands. RATCHET has delivered the
+        // crc-v1 calibration bundle; the remaining gap is the
+        // Mahalanobis-scoring port from CIRISLens's coherence_ratchet.
         match detect(&empty_features()) {
             DetectionResult::None => (),
             other => panic!("v0.1.0 must return None, got {other:?}"),
