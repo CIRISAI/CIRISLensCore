@@ -97,4 +97,19 @@ default = []
 # current_rust_engine` (CIRISPersist#92, v1.13.0+) — are visible.
 python = ["pyo3", "ciris-edge/pyo3", "ciris-persist/pyo3"]
 
-# Benches re-added when benchmark sources land (Phase 1).
+# Benches — criterion suite per docs/BENCHMARKS.md. Mirrors persist
+# + edge bench patterns. `harness = false` because criterion supplies
+# its own; `cargo bench` runs them all, `cargo bench --no-run` is
+# the fast compile-only gate suitable for ci.yml.
+
+[[bench]]
+name = "canonicalize"
+harness = false
+
+[[bench]]
+name = "project"
+harness = false
+
+[[bench]]
+name = "aggregate"
+harness = false

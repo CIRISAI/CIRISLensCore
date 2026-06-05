@@ -83,6 +83,27 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # ─── benches: per-PR compile-only gate ──────────────────────────────
+  #
+  # `cargo bench --no-run` compiles every bench target without running
+  # them — fast (a few seconds beyond the regular check), pass/fail
+  # gates per-PR, catches API drift between lens-core and the bench
+  # fixture builders before it lands in main. The slow actually-run
+  # pass is `bench.yml` (daily cron + manual dispatch + tag triggers,
+  # criterion HTML + bencher text artifact). Same split persist + edge
+  # use.
+  benches:
+    name: bench compile-only gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install libtss2-dev (TPM build dep)
+        run: sudo apt-get update && sudo apt-get install -y libtss2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo bench --no-run
+        run: cargo bench --no-default-features --no-run
+
   # ─── pyo3-wheel: maturin abi3-py310 wheels ──────────────────────────
   #
   # Three wheels per release. Matrix mirrors persist + edge exactly
