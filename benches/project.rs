@@ -91,11 +91,9 @@ fn bench_project(c: &mut Criterion) {
     let mut group = c.benchmark_group("project");
     for size in sizes {
         let features = make_features(size);
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &features,
-            |b, f| b.iter(|| project(black_box(f))),
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &features, |b, f| {
+            b.iter(|| project(black_box(f)))
+        });
     }
     group.finish();
 }

@@ -70,8 +70,7 @@ fn make_envelope(body_size: usize) -> BatchEnvelope {
         }}"#
     );
 
-    serde_json::from_str(&envelope_json)
-        .expect("bench fixture must be a valid BatchEnvelope")
+    serde_json::from_str(&envelope_json).expect("bench fixture must be a valid BatchEnvelope")
 }
 
 fn bench_canonicalize(c: &mut Criterion) {
@@ -85,11 +84,9 @@ fn bench_canonicalize(c: &mut Criterion) {
         // Account each iteration as the *envelope bytes processed*.
         // criterion's Throughput::Bytes lets the report give MB/s.
         group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &envelope,
-            |b, env| b.iter(|| canonical_bytes(black_box(env))),
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &envelope, |b, env| {
+            b.iter(|| canonical_bytes(black_box(env)))
+        });
     }
     group.finish();
 }

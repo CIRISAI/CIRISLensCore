@@ -88,21 +88,9 @@ fn bench_aggregate(c: &mut Criterion) {
         // when given Throughput::Elements; lets the curve show
         // events-aggregated-per-second directly.
         group.throughput(Throughput::Elements(size as u64));
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size),
-            &events,
-            |b, evs| {
-                b.iter(|| {
-                    compute_aggregate(
-                        black_box(evs),
-                        window_start,
-                        window_end,
-                        None,
-                        |e| e.ts,
-                    )
-                });
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(size), &events, |b, evs| {
+            b.iter(|| compute_aggregate(black_box(evs), window_start, window_end, None, |e| e.ts));
+        });
     }
     group.finish();
 }
