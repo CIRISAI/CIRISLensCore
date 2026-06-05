@@ -75,6 +75,8 @@ Engine, lens-core sub-module is unchanged).
   ``ciris_persist::pipeline::scrub::ner::is_configured``.
 - ``PROJECTION_VERSION: str`` — currently ``"crc-v1"``; bumps to
   ``"crc-v2"`` post-RATCHET calibration (CIRISLensCore#3).
+- ``__version__: str`` — top-level package version (Python-stdlib
+  convention). Added in v0.2.2; v0.2.0 + v0.2.1 omitted this.
 
 # What's deliberately NOT in the surface
 
@@ -97,8 +99,11 @@ from .ciris_lens_core import (  # type: ignore[attr-defined]
     scrub_traces_batch,
 )
 
+__version__ = "0.2.2"
+
 __all__ = [
     "PROJECTION_VERSION",
+    "__version__",
     "install_relay",
     "ner_is_configured",
     "process_trace_batch",

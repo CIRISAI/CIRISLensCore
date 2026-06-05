@@ -1,5 +1,37 @@
 # CIRISLensCore Release Notes
 
+# v0.2.2 — `__version__` module attribute
+
+**2026-06-05** — Patch release. Python-stdlib convention is that
+top-level packages expose a `__version__` string attribute; v0.2.0
+and v0.2.1 omitted it, and the CIRISConformance solo-imports check
+accepted `getattr(ciris_lens_core, '__version__', None) is None`
+rather than asserting a concrete value. Downstream tooling that
+reads `__version__` directly (rather than going through
+`importlib.metadata.version("ciris-lens-core")`) saw `None` on
+v0.2.0 + v0.2.1 wheels — `pip show`-style introspection and any
+consumer that mirrors the pattern across the federation
+(`ciris_persist.__version__`, `ciris_edge.__version__`, etc.) got
+a non-usable value.
+
+v0.2.2 adds `__version__ = "0.2.2"` to
+`python/ciris_lens_core/__init__.py` next to `PROJECTION_VERSION`
+in the import/`__all__` block, mirroring the surface symmetry — both
+are module-level string constants the deployed lens and cohabitation
+agent can read directly. `importlib.metadata` consumers see the
+same value via the wheel's `METADATA`; the two paths now agree.
+
+No Rust source changes. The cdylib bytes are identical to v0.2.1
+modulo build-stamp; the wheel deliverable changes only in the
+Python shim and the version metadata.
+
+**Upgrade path:** `pip install --upgrade ciris-lens-core` is
+sufficient. Code that was tolerating
+`ciris_lens_core.__version__ is None` continues to work; code that
+needs a concrete string now gets one.
+
+---
+
 # v0.2.1 — `install_relay` re-export hotfix
 
 **2026-06-05** — Patch release. v0.2.0's PyO3 cdylib correctly registers
