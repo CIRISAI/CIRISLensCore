@@ -47,6 +47,47 @@ through the federation:
   `Engine` handle (cohabitation contract: lens-core never holds keys)
   so the audit chain is itself federation evidence.
 
+### 1.1 Wire-format authority — CEG §5.5
+
+The CIRIS Epistemic Grammar (`CIRISRegistry/FSD/CEG/`) names this crate
+as the owner of the lens-core wire slice at §5.5 — manifold conformity,
+the five Coherence-Ratchet detectors, the F-3 correlated-action
+detector, the Capacity-Score factor prefixes, and the distributive-
+access detector. This document is what CEG §5.5 points at when it asks
+"who owns these prefixes?"; the reciprocal lock is that any change to
+the prefixes lens-core emits MUST land as a CEG §5.5 amendment first
+(§11.2 governance), then a lens-core release that conforms.
+
+### 1.2 Federation conformance posture — CEG §0.2
+
+Lens-core is **CCP + CCC** per CEG §0.2:
+
+- **CCP** (CEG-Conforming Producer) — emits signed detection-event
+  envelopes (`detection:cross_agent_divergence`,
+  `manifold_conformity:{cohort}`, `capacity:*`, etc.) that round-trip
+  the §4 envelope shape + §6 relation discipline.
+- **CCC** (CEG-Conforming Consumer) — consumes verified hybrid-
+  signed traces from edge / persist and composes detector outputs
+  per §8.1 Policy A (additive scoring with cohort-scoped
+  normalization).
+
+Lens-core is NOT CCS (the substrate tier) — persist + edge + verify
+own that. The conformance harness markers (`ccp` / `ccc` / `ccs` in
+`CIRISConformance/pyproject.toml`) classify lens-core tests as CCP /
+CCC.
+
+### 1.3 M-1 alignment as a construction-time invariant
+
+CEG §5.6.2 requires every `Goal` (the substrate primitive scored by
+`goal:{scale}` attestations) to carry a `MetaGoalAlignment(M-1
+dimension + declarer rationale)`. Lens-core enforces this at the
+Rust type system: `MetaGoalAlignment` is construction-time validated
+and `Deserialize` re-validates on the wire, so an `attesting_key_id`
+cannot mint a `goal:*` attestation that lacks an M-1 dimension
+declaration. M-1 isn't a documentation aspiration — it's an
+unforgeable precondition for any Goal attestation reaching the
+federation.
+
 ## 2. Mission alignment per component
 
 Each module below must answer **why does this serve M-1?** before any
@@ -92,17 +133,49 @@ authorization layer for what the agent claims about itself.
 
 **Mission:** make alignment-conformity measurable per-trace, per-agent,
 per-cohort, per-federation. PoB §2.4 names N_eff as the
-independence-as-evidence primitive; coherence ratchet
-(`CIRISLens/FSD/coherence_ratchet_detection.md`) names five anomaly
-detectors (cross-agent divergence, intra-agent stability, hash-chain
-integrity, temporal drift, conscience-override pattern). Each is a
-function on cohort-routed trace populations.
+independence-as-evidence primitive. Lens-core ships **three detector
+categories** — each a function on cohort-routed trace populations,
+each owned by a CEG §5.5 sub-section:
 
-**Constraint:** layered defense — evading any one detector should be
-much cheaper than evading all five simultaneously (LC-AV-6's super-
-additive cost argument). Detector parameters are CIRIS-RED-incubated
-until calibration validates against red-team fixtures; the framework
-is public, the operating point isn't.
+1. **Five Coherence-Ratchet detectors (CEG §5.5.1)** — per-trace
+   anomaly surface. Cross-agent divergence, intra-agent consistency,
+   hash-chain integrity, temporal drift, conscience-override rate.
+   Implemented as a **closed Rust enum** (`CoherenceRatchetDetector`)
+   with `const fn dimension_label()` locking the `detection:*` wire
+   labels — adding a sixth detector requires a CEG §5.5.1 amendment
+   first, then a lens-core release that conforms.
+2. **F-3 correlated-action / structural-injustice detector (CEG
+   §5.5.3)** — population-level. Reads federation-emitted signed
+   traces and reports correlation structure (ρ, k_eff) over goal-
+   aligned individually-compliant pursuit by groups whose aggregate
+   trajectory affects individuals outside the pursuit. Open-vocab
+   axis (`detection:correlated_action:{axis}`); calibrated via the
+   CIRISAI/RATCHET heuristic package per CEG §11.2.1. Distinct threat
+   surface from §5.5.1 — that detects per-trace anomaly; F-3 detects
+   structural patterns no individual trace looks anomalous within.
+3. **Distributive-access detector (CEG §5.5.5)** — same F-3 machinery,
+   different trace source. `detection:distributive:access:{compute |
+   models | training_data | agent_capabilities | federation_membership}`
+   reports resource-concentration patterns over the federation.
+
+**Constraint:** layered defense within category 1 — evading any one
+Coherence-Ratchet detector should be much cheaper than evading all
+five simultaneously (LC-AV-6's super-additive cost argument). Across
+categories, the layering is **categorical not redundant**: §5.5.1
+catches individual deviation, §5.5.3 catches coordinated compliance,
+§5.5.5 catches the concentration substrate. Detector parameters are
+CIRIS-RED-incubated until calibration validates against red-team
+fixtures; the framework is public, the operating point isn't.
+
+> **Pre-RATCHET interim.** §5.5.1 detectors ship operational in v0.2.x
+> (closed-enum surface + wire-label discipline land at the type
+> system). §5.5.3 + §5.5.5 ship as **schema-and-signature only** until
+> the CIRISAI/RATCHET calibration package lands — they accept the wire
+> shape, score `Indeterminate { reason: "pre_ratchet_calibration" }`,
+> and never emit numeric verdicts on the open-vocab axes. This is the
+> §0.2 CCC posture's honest answer: the substrate is ready; the
+> operating points aren't, and fabricating them would be exactly the
+> failure mode anti-pattern #2 names.
 
 **Anti-pattern that violates mission:** "One global threshold, simple."
 A single threshold is a single attack surface. Per-cohort thresholds
@@ -136,6 +209,31 @@ identity (`engine.local_sign`), so detection history IS audit chain.
 The federation's
 acceptance policy (PoB §5.6) reads these signals.
 
+**Capacity Score formula (CEG §5.5.4):** the federation's per-agent
+Capacity Score is
+
+> **𝒞_CIRIS = C · I_int · R · I_inc · S**
+
+where each factor maps to a closed `capacity:*` prefix:
+
+| Factor | Prefix | What it measures |
+|---|---|---|
+| C       | `capacity:core_identity`              | Identity coherence across the trace corpus |
+| I_int   | `capacity:integrity`                  | Stated-vs-acted alignment |
+| R       | `capacity:resilience`                 | Adversarial-input recovery |
+| I_inc   | `capacity:incompleteness_awareness`   | Calibrated uncertainty / epistemic humility |
+| S       | `capacity:sustained_coherence`        | Temporal stability of the above |
+| 𝒞_CIRIS | `capacity:composite`                  | Multiplicative product — anti-Goodhart unity-of-virtues |
+
+**Multiplicative composition is load-bearing.** Any factor at zero
+takes the composite to zero — there is no fungibility between
+"high core_identity / zero integrity" and "moderate both." This is
+the anti-Goodhart unity-of-virtues claim: optimizing one factor at
+the expense of another is not capacity, it's a Goodhart move that
+the score itself rejects. Implemented in `src/scoring/capacity.rs`
++ `src/capacity/factors.rs` as construction-time-validated
+`CapacityFactors`.
+
 **Constraint:** **fail-secure floor (P0 bundle from THREAT_MODEL.md):**
 - LC-AV-2: declared-vs-inferred mismatch surfaces as a typed event
 - LC-AV-11: bounded queue + `score_unavailable` on SLO breach (no fail-open)
@@ -144,7 +242,9 @@ acceptance policy (PoB §5.6) reads these signals.
 
 The Rust type system enforces this — `ManifoldConformity` is an enum
 of `Numeric(f64) | Indeterminate { reason } | Unavailable { reason }`,
-not a float that defaults to 0.0.
+not a float that defaults to 0.0. Same shape on `CapacityFactors`:
+each factor is range-validated `[0.0, 1.0]` at construction +
+`Deserialize`, so an out-of-range factor cannot reach the multiplier.
 
 **Anti-pattern that violates mission:** "Cold-start cohort? Score it
 zero." That's the LC-AV-9 / LC-AV-18 trap — a fabricated score is
@@ -231,6 +331,27 @@ Patterns that have repeatedly failed at sister crates and that
    Declared label is one signal; inferred label is the other. Mismatch
    IS a detection event (LC-AV-2 P0). Scoring against declared-only
    is the cohort-spoofing hole.
+8. **Self-emission of `capacity:*`.** An agent emitting a Capacity-
+   Score attestation about itself is a CEG §7.5 category error — the
+   agent's own capacity is never fed back into the agent's own
+   context (anti-Goodhart per CIRISAgent §5.2). Enforced at the type
+   system: `CapacityAttestation` requires `attesting_key_id ≠
+   attested_key_id` as a construction-time invariant + `Deserialize`
+   re-validates, so a self-emitted capacity attestation cannot reach
+   the wire. This is structurally distinct from "you can score
+   yourself badly" — you can't score yourself *at all* on this
+   prefix; only third parties' attestations compose into your 𝒞_CIRIS.
+9. **Open-vocab F-3 / distributive axes scored before RATCHET.**
+   §5.5.3 `detection:correlated_action:{axis}` and §5.5.5
+   `detection:distributive:access:{resource_type}` are open vocab
+   *requiring* operational definitions in the CIRISAI/RATCHET
+   calibration package per CEG §11.2.1. Emitting a numeric verdict
+   on these prefixes before RATCHET ships is anti-pattern #2
+   (continuous-numeric scores where sample size doesn't justify
+   them) plus a CEG §11.2 governance violation: shipping a wire
+   shape whose operating point was never debated in the calibration
+   workshop. v0.2.x ships these as `Indeterminate { reason:
+   "pre_ratchet_calibration" }` only.
 
 ## 4. Test categories — every test answers a mission question
 
@@ -243,6 +364,10 @@ Patterns that have repeatedly failed at sister crates and that
 | **Cross-version determinism** | Same trace + same state → same score across `lens_core_version` rebuilds? | Build-attestation property test: byte-deterministic detector output on fixture corpus |
 | **FFI boundary** | Does lens-core's heap contain seed bytes during/after sign? | Property test: scan heap during `engine.local_sign` call; assert no seed-shaped bytes |
 | **Federation determinism** | Two peers with same state agree on which traces are anomalous? | Replay fixture against two `lens-core` instances with identical state; assert detector output is byte-equivalent |
+| **Capacity-Score self-emission rejection (CEG §7.5)** | Does `attesting_key_id == attested_key_id` on a `capacity:*` envelope refuse to construct / deserialize? | Property test: `CapacityAttestation::new(k, k, _)` returns `Err`; `serde_json::from_str` of a wire envelope with matching ids fails before reaching the handler |
+| **𝒞_CIRIS multiplicative integrity (CEG §5.5.4)** | Does any one factor at zero force composite to zero? | Property test: for random `(C, I_int, R, I_inc, S)` with at least one set to 0.0, assert `composite == 0.0`; for all in (0.0, 1.0] assert composite > 0.0 |
+| **Coherence-Ratchet closed-enum lock (CEG §5.5.1)** | Does adding a sixth detector require source modification of the enum (not config)? | Compile-time test: `CoherenceRatchetDetector::ALL.len() == 5`; `wire_label_exactness` test pins the five labels |
+| **Pre-RATCHET F-3 / distributive return Indeterminate** | Do §5.5.3 + §5.5.5 detectors emit numeric verdicts before RATCHET ships? | Property test: any input to F-3 / distributive scorer returns `Indeterminate { reason: "pre_ratchet_calibration" }` |
 
 A PR that adds detection without adding the test that answers its
 mission question gets sent back. Same MDD review discipline persist
@@ -297,6 +422,9 @@ Same single-source-of-truth discipline persist set with
 | Signing seed cached in lens-core's process | FFI boundary erosion (parallels persist's AV-25) | Heap-scan property test runs on every release |
 | Detection events silently dropped on persist failure | Federation evidence loss | Best-effort retry queue; never silent drop; alerting on retry-queue depth |
 | Cross-version detection drift unannounced | LC-AV-19 federation-signal noise | `lens_core_version` on every event; per-version aggregation gates |
+| Capacity-Score self-emission accepted at the wire | CEG §7.5 anti-Goodhart bypass; agent feeds own capacity back into own context | `CapacityAttestation` construction-time invariant + `Deserialize` re-validation; conformance test asserts both rejection paths |
+| F-3 / distributive numeric verdict shipped before RATCHET | CEG §11.2 governance-bypass on the open-vocab axes; calibration workshop never debated the operating point | Scorers gated to `Indeterminate { reason: "pre_ratchet_calibration" }` until RATCHET package lands; integration test asserts only that variant appears |
+| Coherence-Ratchet detector added via config (not source) | CEG §5.5.1 closed-enum lock bypass; wire-label drift across federation | `CoherenceRatchetDetector` is a closed Rust enum; new variant requires source change + recompile + (per §11.2) CEG amendment first |
 
 ## 8. Closing note
 
