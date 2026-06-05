@@ -165,6 +165,181 @@ jobs:
           name: ciris_lens_core-wheel-${{ matrix.label }}
           path: target/wheels/*.whl
 
+  # ─── ios-pyo3: PyO3 abi3 cross-compile for iOS (device + sim) ───────
+  #
+  # Mirrors edge's `ios-pyo3` lane. Two matrix entries — device
+  # (`aarch64-apple-ios`) and simulator (`aarch64-apple-ios-sim`) —
+  # each cross-compile a `ciris_lens_core.abi3.so` against the
+  # Python-Apple-support libpython for iOS. NOT a Python wheel:
+  # BeeWare Briefcase consumes the `.abi3.so` files via its own
+  # `iOS.pth` mechanism, not via pip install (same shape persist +
+  # edge ship).
+  #
+  # PYTHON_IOS_VER / PYTHON_IOS_BUILD pins match persist's exactly
+  # (CIRISPersist ci.yml's ios-build job docblock has the upstream
+  # rationale for the specific 3.10.b13 pin). Cohabitation requires
+  # all three (persist + edge + lens-core) to ship the same iOS
+  # libpython binding, otherwise the agent's iOS app loads three
+  # different `_sysconfigdata__ios_arm64-iphoneos.py` files and at
+  # most one wins.
+  ios-pyo3:
+    name: ios PyO3 abi3 (${{ matrix.target }})
+    runs-on: macos-14
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-ios,     dir: ios-device,    sysconfig: _sysconfigdata__ios_arm64-iphoneos.py,       xcfw_dir: ios-arm64 }
+          - { target: aarch64-apple-ios-sim, dir: ios-simulator, sysconfig: _sysconfigdata__ios_arm64-iphonesimulator.py, xcfw_dir: ios-arm64_x86_64-simulator }
+    env:
+      PYTHON_IOS_VER: "3.10"
+      PYTHON_IOS_BUILD: "b13"
+      # `python` feature propagates pyo3 + ciris-edge/pyo3 +
+      # ciris-persist/pyo3 to the iOS build — same surface the
+      # linux/darwin wheel matrix exercises.
+      IOS_PYO3_FEATURES: "python"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: false
+          key: ios-pyo3-${{ matrix.target }}
+        continue-on-error: true
+      - name: Repair toolchain if rustup-init shadow (cache-poison heal)
+        # macos-14 runners exhibit rustup-init shim poison-restore
+        # under Swatinem/rust-cache; CIRISVerify v2.1.4+ pattern,
+        # mirrored in persist + edge.
+        shell: bash
+        run: |
+          if cargo build --help 2>&1 | grep -q "rustup-init"; then
+            echo "::warning::Detected rustup-init shadow in ~/.cargo/bin; reinstalling toolchain"
+            rm -rf "$HOME/.cargo/bin"
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup default stable
+          cargo --version
+      - uses: actions/setup-python@v5
+        with:
+          # Host runner Python (3.13). The target Python comes from
+          # Python-Apple-support; persist + edge both pin 3.13 here.
+          python-version: "3.13"
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: download Python-Apple-support (iOS)
+        id: python-ios
+        # Stage libpython + matching _sysconfigdata into one dir for
+        # PYO3_CROSS_LIB_DIR. Persist's recipe verbatim — keep the
+        # cohabitation libpython binding aligned across all three
+        # repos.
+        run: |
+          SUPPORT_URL="https://github.com/beeware/Python-Apple-support/releases/download/${PYTHON_IOS_VER}-${PYTHON_IOS_BUILD}/Python-${PYTHON_IOS_VER}-iOS-support.${PYTHON_IOS_BUILD}.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/python-ios"
+          curl -sL "${SUPPORT_URL}" -o "${RUNNER_TEMP}/python-ios-support.tar.gz"
+          tar xzf "${RUNNER_TEMP}/python-ios-support.tar.gz" -C "${RUNNER_TEMP}/python-ios"
+
+          XCFW="${RUNNER_TEMP}/python-ios/Python.xcframework"
+
+          STAGE_DIR="${RUNNER_TEMP}/pyo3-ios-stage"
+          mkdir -p "$STAGE_DIR"
+          cp "$XCFW/${{ matrix.xcfw_dir }}/Python.framework/Python" \
+             "$STAGE_DIR/libpython${PYTHON_IOS_VER}.dylib"
+          cp "$XCFW/${{ matrix.xcfw_dir }}/lib-arm64/python${PYTHON_IOS_VER}/${{ matrix.sysconfig }}" \
+             "$STAGE_DIR/"
+          echo "lib_dir=${STAGE_DIR}" >> "$GITHUB_OUTPUT"
+
+          echo "✓ Python-Apple-support ${PYTHON_IOS_VER}-${PYTHON_IOS_BUILD} staged for ${{ matrix.target }}"
+          ls -la "$STAGE_DIR/"
+      - name: cargo build (ios PyO3 — ${{ matrix.target }})
+        env:
+          PYO3_CROSS: "1"
+          PYO3_CROSS_PYTHON_VERSION: "3.10"
+          PYO3_CROSS_LIB_DIR: ${{ steps.python-ios.outputs.lib_dir }}
+        # Direct `cargo build` — not `maturin build`. Maturin 1.13's
+        # platform check rejects darwin→iOS cross-compile; persist
+        # documented this in v2.0.4 and the constraint persists.
+        run: >-
+          cargo build --release
+          --target ${{ matrix.target }}
+          --lib
+          --features "$IOS_PYO3_FEATURES"
+      - name: strip + rename + install_name fix
+        # Mach-O rename: libciris_lens_core.dylib →
+        # ciris_lens_core.abi3.so (Python extension naming
+        # convention). install_name_tool rewrites the embedded path
+        # from /Users/runner/work/... to @rpath-relative for
+        # Briefcase consumption. The hash-integrity hit is intentional
+        # and accepted (same posture persist + edge take).
+        run: |
+          mkdir -p "dist/${{ matrix.dir }}"
+          SRC="target/${{ matrix.target }}/release/libciris_lens_core.dylib"
+          DST="dist/${{ matrix.dir }}/ciris_lens_core.abi3.so"
+          if [ ! -f "$SRC" ]; then
+            echo "::error::$SRC not found"
+            ls -la "target/${{ matrix.target }}/release/" | grep ciris
+            exit 1
+          fi
+          strip -x "$SRC"
+          install_name_tool -id \
+            "@rpath/ciris_lens_core.ciris_lens_core.framework/ciris_lens_core.ciris_lens_core" \
+            "$SRC"
+          cp "$SRC" "$DST"
+          echo "✓ ${{ matrix.dir }}: $(stat -f%z "$DST" 2>/dev/null || stat -c%s "$DST") bytes"
+          otool -D "$DST"
+          file "$DST"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-ios-pyo3-${{ matrix.dir }}
+          path: dist/${{ matrix.dir }}/ciris_lens_core.abi3.so
+          if-no-files-found: error
+
+  # ─── ios-pyo3-package: collect device + simulator into one tarball ──
+  #
+  # Output shape matches persist + edge exactly:
+  #
+  #     ciris-lens-core-v{VERSION}-ios.tar.gz
+  #       ├── ios-device/ciris_lens_core.abi3.so
+  #       └── ios-simulator/ciris_lens_core.abi3.so
+  #
+  # Briefcase consumes via its `iOS.pth` mechanism; this is NOT a
+  # pip-installable wheel.
+  ios-pyo3-package:
+    name: ios PyO3 package (device + simulator tarball)
+    needs: ios-pyo3
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ciris-lens-core-ios-pyo3-*
+          path: dist
+      - name: assemble tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OUTDIR="ciris-lens-core-v${VERSION}-ios"
+          mkdir -p "$OUTDIR/ios-device" "$OUTDIR/ios-simulator"
+          cp dist/ciris-lens-core-ios-pyo3-ios-device/ciris_lens_core.abi3.so "$OUTDIR/ios-device/"
+          cp dist/ciris-lens-core-ios-pyo3-ios-simulator/ciris_lens_core.abi3.so "$OUTDIR/ios-simulator/"
+          tar czf "${OUTDIR}.tar.gz" "$OUTDIR"
+          ls -la "${OUTDIR}.tar.gz"
+          tar tzf "${OUTDIR}.tar.gz"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-ios
+          path: ciris-lens-core-v${{ steps.version.outputs.version }}-ios.tar.gz
+
   # ─── publish-pypi: tag-gated wheel upload via OIDC ──────────────────
   #
   # Trust posture for v0.1.0: PEP 740 sigstore attestation via OIDC
