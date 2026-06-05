@@ -1,5 +1,143 @@
 # CIRISLensCore Release Notes
 
+# v0.3.0 — RATCHET `crc-v1` calibration bundle consumption (#3 partial close)
+
+**2026-06-05** — Minor release. CIRISAI/RATCHET shipped its initial
+calibration package `crc-v1` on 2026-05-13 (264-thought corpus,
+16-field projection, per-cohort centroids, `sample_size_gate: 500`,
+provisional `2.5σ` Mahalanobis threshold). Lens-core v0.3.0 lands the
+**consumption path** — partial close on CIRISLensCore#3.
+
+## What v0.3.0 ships
+
+### `src/scoring/calibration.rs` — typed `CalibrationBundle`
+
+Strict-validation mirror of the RATCHET bundle:
+
+- `CalibrationBundle::from_yaml(&str)` — sovereign-mode loaders that
+  ship the bundle alongside the binary parse the YAML form directly
+  (used by tests + the standalone-rlib path).
+- `CalibrationBundle::from_persist_row(...)` — runtime path; consumes
+  persist v3.14.3's `CalibrationBundle` row shape from the
+  `cirislens_derived.calibration_bundles` table (`DerivedSchema::
+  get_current_calibration_bundle`).
+- `Projection`, `Standardization`, `CohortCentroid` — sub-shapes
+  intentionally lens-core-local, NOT re-exports from persist, so the
+  strict-validation invariants live on lens-core's side of the
+  boundary. Length / mismatch / version-pin checks fail loudly at
+  construction; `BundleError` is a 9-variant `thiserror` enum that
+  names exactly which invariant the input violated.
+- `CRC_V1_FIELD_ORDER` — the 16-string lock-in for the
+  `projection_version: crc-v1` field order. Validated against every
+  bundle's `field_order`; mismatch is `BundleError::FieldOrderMismatch
+  { index }`, never silent acceptance.
+
+### `LensCore::with_calibration_bundle` — builder wiring
+
+The runtime carries the bundle on the `LensCore` handle; pipeline
+lifecycle now consults the bundle before falling back to the
+LC-AV-9 cold-start path. Without a bundle, behavior is unchanged
+from v0.2.x. With the bundle:
+
+- Trace's inferred cohort IS in `bundle.centroids` AND
+  `centroid.sample_count >= bundle.sample_size_gate` →
+  (Phase 2: score against centroid. v0.3.0: still no-op detector,
+  returns `Indeterminate{CohortColdStart}` — code comment marks the
+  spot where Phase 2 lands the centroid-Mahalanobis branch.)
+- Trace's inferred cohort IS in `bundle.centroids` AND
+  `centroid.sample_count < bundle.sample_size_gate` →
+  `ManifoldConformity::Indeterminate{SampleSizeBelowGate{current,
+  gate}}` (sharper reason than v0.2.x's `CohortColdStart`).
+- Trace's inferred cohort NOT in `bundle.centroids` →
+  `Indeterminate{CohortColdStart}` (genuine cold-start; cohort not
+  present in calibration corpus).
+
+### Sample-size gate behavior with shipped `crc-v1`
+
+The shipped `crc-v1` bundle has 3 cohort cells with sample counts
+119 / 90 / 55 — **all below the 500-thought gate**. So every trace
+that matches one of those 3 cohorts gets
+`Indeterminate{SampleSizeBelowGate{current, gate: 500}}`; cohorts not
+in the corpus get `CohortColdStart`. Either way the fail-secure shape
+holds; the reason-variant is sharper post-bundle. Real `Numeric(σ)`
+verdicts await both (a) RATCHET's next calibration run with ≥3 cells
+above the gate (per `crc-v1/README.md` "v0.2 plan") AND (b) lens-core
+Phase-2 detector body landing.
+
+### `IndeterminateReason::SampleSizeBelowGate` — new return path
+
+`scoring/assembly.rs` gained an `AssemblyInput::BundleSampleBelowGate
+{ current, gate }` variant + handler + test. The pre-bundle world
+could only produce `SampleSizeBelowGate` via the calibration-time-
+windowed gate; the bundle world now produces it on the read path
+too, with the same `current` / `gate` numbers in the reason payload
+so consumers see why scoring fell through.
+
+### `src/detector/mod.rs` — docstring currency
+
+The "until RATCHET delivers centroids" framing is gone. RATCHET HAS
+delivered centroids (the bundle ships them); the no-op detector now
+gates on "Phase 2 detector body landing" — a lens-core-internal
+gate, not a substrate-external one. Mirrors the MISSION pass-2.2
+discipline (RATCHET ≠ "not shipped"; per-axis-family extension is
+the unshipped piece).
+
+## Tests added: 6
+
+- `scoring::calibration::parses_shipped_crc_v1_bundle` — reads
+  `CIRISAI/RATCHET/release/calibration/crc-v1/bundle.yaml` at test
+  time, asserts every load-bearing field round-trips (version,
+  ratchet_calibration_version, gate, threshold, 16-field order,
+  14-of-16 retention mask, all 3 cohorts below gate).
+- `scoring::calibration::projection_version_must_match_lens_core_constant`
+  — `crc-v2` would be silently accepted in a less-strict world; lens-
+  core fails loudly.
+- `scoring::calibration::field_order_mismatch_rejected_at_index` —
+  reorders fields, asserts `FieldOrderMismatch{index: 0}`.
+- `scoring::calibration::lookup_cohort_returns_some_for_known_cohort`
+  — all-null cohort, sample_count=119.
+- `scoring::calibration::lookup_cohort_returns_none_for_unknown_cohort`
+  — fallthrough path.
+- `scoring::assembly::bundle_sample_below_gate_yields_indeterminate_with_numbers`
+  — `current` and `gate` carry through to the emitted Indeterminate
+  payload so consumers can render the gate gap.
+
+## Substrate dependency
+
+- `serde_yaml = "0.9"` added to `Cargo.toml` for the
+  `CalibrationBundle::from_yaml` sovereign-loader path.
+- `ciris-persist v3.14.3` already exposes
+  `derived::{CalibrationBundle, CohortCentroid, ProjectionMetadata,
+  Standardization}` plus `DerivedSchema::{put_calibration_bundle,
+  get_current_calibration_bundle, get_calibration_bundle_by_version}`
+  on both sqlite + postgres backends. No upstream gate was hit.
+
+## Known follow-ons
+
+- **Phase 2 detector body** (still no-op at v0.3.0). The
+  `assembly_input_from_bundle` "above-gate" branch is the spot;
+  centroid-Mahalanobis scoring replaces it when ready.
+- **`Engine::get_current_calibration_bundle()` facade** (CIRISPersist
+  ask, not blocking). Trait method exists; an Engine-level convenience
+  wrapper would let consumers skip the `engine.backend()` match.
+- **Bundle freshness signal**. `bundle.calibrated_at` is carried as
+  `Option<String>` on lens-core's typed bundle; consumers can stale-
+  check, but no explicit freshness-policy hook lands at v0.3.0.
+
+## Upgrade path
+
+`pip install --upgrade ciris-lens-core` for the Python cohabitation
+agents; `Cargo.toml` tag bump for the rlib consumers. No breaking
+API change — `process_trace_batch` + `install_relay` + the v0.1.x
+4-function drop-in surface all stable.
+
+`LensCore::with_calibration_bundle` is opt-in additive; existing
+constructors (`LensCore::relay`, `LensCore::attach_handler`) work
+unchanged and route every trace through the v0.2.x cold-start path
+as before.
+
+---
+
 # v0.2.2 — `__version__` module attribute
 
 **2026-06-05** — Patch release. Python-stdlib convention is that
