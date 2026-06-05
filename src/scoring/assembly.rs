@@ -31,16 +31,22 @@
 
 use crate::scoring::result::{IndeterminateReason, ManifoldConformity};
 
-/// Inputs to [`assemble`]. Three variants cover every outcome of the
-/// upstream cohort + detector stages:
+/// Inputs to [`assemble`]. Four variants cover every outcome of the
+/// upstream cohort + detector + calibration stages:
 ///
 /// - [`AssemblyInput::Scored`] — detector produced a Mahalanobis
 ///   distance against a known cohort centroid.
 /// - [`AssemblyInput::CohortColdStart`] — cohort centroid not yet
 ///   calibrated (RATCHET hasn't shipped this cohort in any bundle
-///   so far).
+///   so far, or no bundle is loaded at all).
 /// - [`AssemblyInput::AmbiguousCohort`] — inferred-cohort classifier
 ///   couldn't disambiguate among multiple candidates.
+/// - [`AssemblyInput::BundleSampleBelowGate`] — calibration bundle
+///   loaded, the cohort is represented, but its `sample_count` is
+///   below the bundle's `sample_size_gate`. Used by the lifecycle
+///   when the lookup hits the gate before any detector body runs
+///   (so we don't need a fabricated `mahalanobis` value to thread
+///   through `Scored`).
 #[derive(Debug, Clone)]
 pub enum AssemblyInput {
     /// Scoring completed successfully — detector produced a
@@ -59,6 +65,11 @@ pub enum AssemblyInput {
     /// Inferred-cohort classifier couldn't decide among multiple
     /// candidate centroids (LC-AV-2 edge case).
     AmbiguousCohort,
+    /// Calibration-bundle lookup found the cohort but its sample
+    /// count is below the bundle's gate. Routes directly to
+    /// `Indeterminate { SampleSizeBelowGate }` without needing a
+    /// fabricated Mahalanobis value (which `Scored` would require).
+    BundleSampleBelowGate { current: u32, gate: u32 },
 }
 
 /// Collapse `input` into a [`ManifoldConformity`] under the
@@ -72,6 +83,11 @@ pub fn assemble(input: AssemblyInput, sample_size_gate: u32) -> ManifoldConformi
         AssemblyInput::AmbiguousCohort => ManifoldConformity::Indeterminate {
             reason: IndeterminateReason::InferredCohortAmbiguous,
         },
+        AssemblyInput::BundleSampleBelowGate { current, gate } => {
+            ManifoldConformity::Indeterminate {
+                reason: IndeterminateReason::SampleSizeBelowGate { current, gate },
+            }
+        }
         AssemblyInput::Scored {
             mahalanobis,
             cohort_sample_count,
@@ -227,6 +243,30 @@ mod tests {
         match out {
             ManifoldConformity::Numeric(s) => assert!(s.is_nan()),
             other => panic!("expected Numeric, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bundle_sample_below_gate_yields_indeterminate_with_numbers() {
+        // Lifecycle path when bundle hydration found the cohort but
+        // its sample_count was below the gate. Routes to the same
+        // IndeterminateReason::SampleSizeBelowGate as Scored-below-gate
+        // does, just without needing a fabricated mahalanobis value.
+        let out = assemble(
+            AssemblyInput::BundleSampleBelowGate {
+                current: 119,
+                gate: 500,
+            },
+            500,
+        );
+        match out {
+            ManifoldConformity::Indeterminate {
+                reason: IndeterminateReason::SampleSizeBelowGate { current, gate },
+            } => {
+                assert_eq!(current, 119);
+                assert_eq!(gate, 500);
+            }
+            other => panic!("expected SampleSizeBelowGate, got {other:?}"),
         }
     }
 

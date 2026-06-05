@@ -3,11 +3,15 @@
 //! See MISSION.md §2 scoring/.
 
 pub mod assembly;
+pub mod calibration;
 pub mod capacity;
 pub mod n_eff;
 pub mod result;
 
 pub use assembly::{assemble, AssemblyInput};
+pub use calibration::{
+    BundleError, CalibrationBundle, CohortCentroid, Projection, Standardization,
+};
 pub use capacity::capacity;
 pub use n_eff::kish_n_eff;
 pub use result::{
