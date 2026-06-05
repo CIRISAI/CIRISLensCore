@@ -1,13 +1,32 @@
 """ciris_lens_core — Science-layer runtime for the CIRIS federation.
 
 Cohort routing + manifold-conformity scoring + hybrid-signed detection
-events. Folds into the agent post-PoB §3.1; v0.1.0 ships as a PyO3
-cdylib the deployed CIRISLens product consumes during the cutover
-window.
+events. As of v0.2.0 lens-core is folded into the cohabitation agent
+via ``install_relay(edge)``; the v0.1.x four-function drop-in surface
+is preserved as a delegating shim for the deployed-CIRISLens cutover.
 
 Mission alignment: see ``MISSION.md`` in the repo root.
 
-# Phase 1 swap contract (deployed-lens cutover)
+# v0.2.0 cohabitation entry — install_relay
+
+The federation-canonical bootstrap. Every cohabitation agent (post-
+fold-in) registers lens-core as a handler on the shared ``Arc<Edge>``
+via:
+
+>>> import ciris_edge
+>>> import ciris_lens_core
+>>>
+>>> edge = ciris_edge.init_edge_runtime(...)  # host constructs Edge
+>>> ciris_lens_core.install_relay(edge)        # register lens handler
+
+Lens-core never holds keys. The Engine that signs detection events
+arrives across the cohabitation boundary inside ``edge`` (Edge's
+PyCapsule accessor exposes the host's ``ciris_persist.Engine``);
+lens-core calls ``engine.local_sign`` / ``engine.local_pqc_sign``
+through that handle. See CIRISPersist#51 for the rename history
+(``steward_sign`` → ``local_sign``, Engine-as-parameter contract).
+
+# v0.1.x deployed-lens drop-in (preserved for cutover)
 
 The deployed Python lens replaces its in-tree ``cirislens_core``
 import with this package via one-line alias:
@@ -20,16 +39,16 @@ import with this package via one-line alias:
 # Engine-as-parameter — lens-core never holds keys
 
 ``process_trace_batch`` takes a ``ciris_persist.Engine`` instance as
-its first parameter. Lens-core calls ``engine.steward_sign`` +
-``engine.steward_pqc_sign`` + ``engine.put_detection_event`` to
+its first parameter. Lens-core calls ``engine.local_sign`` +
+``engine.local_pqc_sign`` + ``engine.put_detection_event`` to
 sign and persist detection events through the host's identity.
 Lens-core never reads key material directly — same pattern survives
-the PoB §3.1 fold-into-agent (agent's Engine replaces deployed-lens's
+the fold-into-agent (agent's Engine replaces deployed-lens's
 Engine, lens-core sub-module is unchanged).
 
 >>> import ciris_lens_core
 >>> import ciris_persist as cp
->>> engine = cp.Engine(...)  # host constructs with steward keys
+>>> engine = cp.Engine(...)  # host constructs with signing keys
 >>> result = ciris_lens_core.process_trace_batch(
 ...     engine,
 ...     events=trace_json_list,
@@ -37,13 +56,16 @@ Engine, lens-core sub-module is unchanged).
 ... )
 >>> # result["detections"] is a list of {detection_id, trace_id, severity}
 
-# v0.1.0 surface
+# Surface
 
+- ``install_relay(edge)`` — **v0.2.0 cohabitation bootstrap.** Registers
+  lens-core's relay handler on the shared ``Arc<Edge>``; the host-owned
+  Engine on ``edge`` becomes the signing identity for detection events.
 - ``process_trace_batch(engine, events, batch_timestamp, ...)`` — full
   pipeline (cohort + projection + no-op detector + scoring +
   signing). Every trace produces ``ManifoldConformity::Indeterminate
   {CohortColdStart}`` until RATCHET centroids ship via persist's
-  ``calibration_bundles`` in Phase 2.
+  ``calibration_bundles``.
 - ``scrub_trace(trace_json, level)`` — delegates to
   ``ciris_persist::pipeline::scrub::scrub_trace``. Returns
   ``{"trace": <json string>, "level": <str>, "stats": <dict>}``.
@@ -51,8 +73,10 @@ Engine, lens-core sub-module is unchanged).
   ``ciris_persist::pipeline::scrub::scrub_traces_batch``.
 - ``ner_is_configured() -> bool`` — delegates to
   ``ciris_persist::pipeline::scrub::ner::is_configured``.
+- ``PROJECTION_VERSION: str`` — currently ``"crc-v1"``; bumps to
+  ``"crc-v2"`` post-RATCHET calibration (CIRISLensCore#3).
 
-# What's deliberately NOT in v0.1.0
+# What's deliberately NOT in the surface
 
 Seven legacy ``cirislens_core`` functions are absent
 (``load_schemas_from_db``, ``refresh_schema_cache``,
@@ -66,6 +90,7 @@ lens deletes the obsolete call sites at swap time.
 
 from .ciris_lens_core import (  # type: ignore[attr-defined]
     PROJECTION_VERSION,
+    install_relay,
     ner_is_configured,
     process_trace_batch,
     scrub_trace,
@@ -74,6 +99,7 @@ from .ciris_lens_core import (  # type: ignore[attr-defined]
 
 __all__ = [
     "PROJECTION_VERSION",
+    "install_relay",
     "ner_is_configured",
     "process_trace_batch",
     "scrub_trace",

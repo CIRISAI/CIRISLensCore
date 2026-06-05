@@ -1,5 +1,41 @@
 # CIRISLensCore Release Notes
 
+# v0.2.1 — `install_relay` re-export hotfix
+
+**2026-06-05** — Patch release. v0.2.0's PyO3 cdylib correctly registers
+`install_relay` (the cohabitation bootstrap entry — see v0.2.0 notes
+below), but the Python `__init__.py` shim at
+`python/ciris_lens_core/__init__.py` did not re-export the symbol;
+`dir(ciris_lens_core)` on the v0.2.0 wheel surfaced
+`process_trace_batch / scrub_trace / scrub_traces_batch /
+ner_is_configured / PROJECTION_VERSION` only, and `install_relay`
+was unreachable from the top-level module despite the v0.2.0
+release notes naming it the cohabitation entry. Every cohabitation
+agent post-fold-in calls `ciris_lens_core.install_relay(edge)`; on
+v0.2.0 that resolves to `AttributeError`.
+
+CIRISConformance `test_ciris_lens_core_exposes_install_relay`
+(`tests/test_010_solo_imports.py`) is the regression gate going
+forward — locks `install_relay in dir(ciris_lens_core)` for every
+matrix entry.
+
+Also folds in the MISSION.md three-pass refresh (drift fix + CEG
+§5.5 alignment + F-3 / distributive reconciliation to v0.2.0 source
+state) and refreshes the `__init__.py` docstring to current
+cohabitation terminology (`local_sign` not `steward_sign`; fold-in
+in past tense not future).
+
+No Rust source changes. The cdylib bytes are identical to v0.2.0
+modulo build-stamp; the wheel deliverable changes only in the
+Python shim and the version metadata.
+
+**Upgrade path:** `pip install --upgrade ciris-lens-core` is
+sufficient. Cohabitation agents that were calling
+`install_relay` and failing with `AttributeError` on v0.2.0 work
+out of the box on v0.2.1.
+
+---
+
 # v0.2.0 — federation cohabitation + CEG §5.5 foundations
 
 **2026-05-30** — The lens-core release the deployed Python lens
