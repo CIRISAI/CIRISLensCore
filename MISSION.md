@@ -95,6 +95,30 @@ code lands. (Pass-2 of this document will enumerate the full v0.2.0
 module set against CEG §5.5; pass-1 below covers the historic
 mission-critical surfaces.)
 
+### 2.0 Module map
+
+This map names every v0.2.x module and its CEG §5.5 anchor (if any).
+Modules marked "(internal mechanic)" implement crate-internal mechanism
+that no CEG wire-format directly references; their mission alignment is
+covered by the subsection of the CEG-anchored module they support.
+
+| Module | Role | CEG anchor |
+|---|---|---|
+| `capacity/` | CEG §5.5.4 Capacity-Score primitives (`𝒞_CIRIS = C · I_int · R · I_inc · S`) | §5.5.4 `capacity:*` |
+| `cohort/` | Declared + inferred routing; mismatch is itself a detection signal (LC-AV-2 P0) | — (internal mechanic) |
+| `config/` | Pan-mode shared config types — `UpstreamLens`, `EgressFilter`, `RetentionPolicy` (FSD §3 + §8) | — (internal mechanic) |
+| `detector/` | Manifold-conformity + 5 Coherence-Ratchet detectors + F-3 + distributive-access | §5.5.1, §5.5.3, §5.5.5 |
+| `extract/` | Re-exports typed extraction primitives from `ciris_persist::pipeline::extract` (CIRISPersist#19) | — (internal mechanic) |
+| `ffi/` | PyO3 cdylib FFI surface for the lens-deployed-product cutover window | — (internal mechanic) |
+| `observability/` | Crate-internal observability hooks; implementation pending Phase 1 kickoff | — (internal mechanic) |
+| `pipeline/` | Orchestrates the per-trace lifecycle under one bounded latency budget | — (internal mechanic) |
+| `retention/` | Enforces `RetentionPolicy` via persist's `storage_summary` + eviction primitives (v0.4 / CIRISLensCore#13) | — (internal mechanic) |
+| `role/` | Lens-core's three deployment-mode runtimes — client / relay / node (FSD §3) | — (internal mechanic) |
+| `scores/` | Agent-side score read path closing the self-awareness loop (CIRISLensCore#19) | §5.5 |
+| `scoring/` | N_eff (Kish), capacity band, LC-AV-18 assembly gate, `ManifoldConformity` result enum | — (internal mechanic) |
+| `signing/` | `canonicalize` + `local_sign` for detection events via the host-owned `Engine` handle | §7 reserved emitter rules |
+| `wire/` | Federation-public ABI for trace event types; re-exports `ciris_persist::schema::*` | wire envelope discipline |
+
 > **PII scrubbing was absorbed into `ciris-persist` v0.6.0 per
 > CIRISPersist#19.** Lens-core no longer owns a `scrub/` module; the
 > originating client node scrubs at egress, and relay mode passes
