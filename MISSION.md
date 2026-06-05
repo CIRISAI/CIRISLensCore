@@ -26,12 +26,14 @@ of independence — all of those are computations on the trace corpus.
 **Lens-core is where those computations live**.
 
 Per PoB §3.1, lens-core is "a function any peer can run on data the
-peer already has." That makes it a **library**, not a service. It folds
-into the agent post-PoB §3.1: every agent runs detection on its own
-hot path, federation peers cross-validate via persist's substrate, no
-central authoritative scorer exists. The federated ratchet bet works
-because the math is decentralized — every peer can re-derive the same
-score from the same trace + federation state.
+peer already has." That makes it a **library**, not a service. As of
+v0.2.0 it has folded into the cohabitation agent: every agent runs
+detection on its own hot path via `install_relay(edge)` /
+`LensCore::attach_handler(&edge, engine)`, federation peers cross-
+validate via persist's substrate, no central authoritative scorer
+exists. The federated ratchet bet works because the math is
+decentralized — every peer can re-derive the same score from the same
+trace + federation state.
 
 The crate's job is to **route, score, and sign** every trace passing
 through the federation:
@@ -41,33 +43,28 @@ through the federation:
   distribution; mismatch is a detection signal).
 - **Score** the trace against the cohort's manifold-conformity
   centroid; update per-agent N_eff and capacity score.
-- **Sign** detection events via `persist.steward_sign()` so the audit
-  chain is itself federation evidence.
+- **Sign** detection events via `engine.local_sign` on the host-owned
+  `Engine` handle (cohabitation contract: lens-core never holds keys)
+  so the audit chain is itself federation evidence.
 
 ## 2. Mission alignment per component
 
-The FSD names six modules. Each must answer **why does this serve
-M-1?** before any code lands.
+Each module below must answer **why does this serve M-1?** before any
+code lands. (Pass-2 of this document will enumerate the full v0.2.0
+module set against CEG §5.5; pass-1 below covers the historic
+mission-critical surfaces.)
 
-### `scrub/` (WHAT × HOW)
-
-**Mission:** strip PII from trace content while preserving cryptographic
-provenance. M-1's "diverse sentient beings may pursue their own
-flourishing" includes the people whose conversations agents reasoned
-about. A research corpus with PII is a corpus that can't be public; a
-public corpus that compromises its data subjects is a worse violation
-than no corpus at all.
-
-**Constraint:** scrub is per-trace at receive time, deterministic,
-bounded latency. NER (DistilBERT INT8) + regex (email/phone/IP/SSN/CC
-patterns) + per-tier dispatch (`generic` bypass, `detailed` strips text
-content, `full_traces` runs full NER+regex). Original-content hash
-preserved for provenance even after scrub.
-
-**Anti-pattern that violates mission:** "We'll scrub later, the corpus
-is private for now." That's how PII leaks land in archives that get
-exfiltrated 18 months later. Scrub at receive, before the row lands
-in persist. Same shape lens already proved at v0.1.3.
+> **PII scrubbing was absorbed into `ciris-persist` v0.6.0 per
+> CIRISPersist#19.** Lens-core no longer owns a `scrub/` module; the
+> originating client node scrubs at egress, and relay mode passes
+> `&NullScrubber` to persist's ingest facade because re-scrubbing at
+> a relay is a category error (federation traffic is post-egress-
+> filter by contract — see CIRISPersist#89). The v0.1.1 four-function
+> Python surface (`scrub_trace`, `scrub_traces_batch`,
+> `ner_is_configured`, `process_trace_batch`) is preserved as a
+> delegating shim through `ffi/pyo3.rs` so deployed lens consumers
+> keep their drop-in import contract across v0.2.0; the implementation
+> lives in `ciris_persist::pipeline::scrub`.
 
 ### `cohort/` (WHO × WHAT)
 
@@ -134,8 +131,9 @@ category error (CIRISLensCore#6).
 
 **Mission:** convert detector outputs into the federation's signal
 language: capacity scores, N_eff trajectories, detection events.
-Every score is a record in persist signed via the host's steward
-identity, so detection history IS audit chain. The federation's
+Every score is a record in persist signed via the host's signing
+identity (`engine.local_sign`), so detection history IS audit chain.
+The federation's
 acceptance policy (PoB §5.6) reads these signals.
 
 **Constraint:** **fail-secure floor (P0 bundle from THREAT_MODEL.md):**
@@ -155,8 +153,11 @@ window. `indeterminate` is the right answer.
 
 ### `pipeline/` (HOW)
 
-**Mission:** orchestrate the per-trace lifecycle (scrub → route →
-score → sign) under a single bounded latency budget. Hot-path
+**Mission:** orchestrate the per-trace lifecycle (route → score →
+sign) under a single bounded latency budget. (Scrub is upstream of
+this pipeline now — persist owns it; see the §2 box above. Lens-core
+receives already-scrubbed traces from the cohabitation `&Edge` /
+`&Engine` boundary.) Hot-path
 correctness is what makes the detection layer actually usable on a
 running agent — if scoring takes >SLO, the agent has to choose between
 blocking on detection or shipping unscored traces. Both options leak.
@@ -177,19 +178,23 @@ trace makes the failure observable per-trace, not just in aggregate.
 
 **Mission:** every detection event is itself federation evidence.
 Cross-peer cross-validation depends on the events being signed by
-the same steward identity that signs the host's federation_keys row.
+the same identity that signs the host's `federation_keys` row.
 Without this, detection events are unattributable claims; with it,
 they're signed records that any peer can re-verify.
 
-**Constraint:** uses `persist.steward_sign()` exclusively. Lens-core
-holds the `Engine` handle, never the seed bytes. Same FFI-boundary
-discipline persist established for v0.2.2. Signing happens in the
-hot path (per-event); cold-path PQC fill-in for the signed events
-follows persist's writer contract.
+**Constraint:** uses `engine.local_sign` / `engine.local_pqc_sign`
+exclusively on the host-owned `Engine` handle that arrives across
+the cohabitation boundary (PyO3 `install_relay(edge)` or rlib
+`LensCore::attach_handler(&edge, engine)`). Lens-core never holds
+keys — signing identity belongs to the host. Same FFI-boundary
+discipline persist landed via CIRISPersist#51 (`steward_sign` →
+`local_sign` rename + Engine-as-parameter contract). Hot-path signing
+is `local_sign`; cold-path PQC fill-in is `local_pqc_sign`, also
+host-mediated.
 
-**Anti-pattern that violates mission:** "Cache the steward key for
-performance." The steward seed never crosses the FFI boundary, period.
-If signing latency is too high, optimize persist's signer (in persist),
+**Anti-pattern that violates mission:** "Cache the signing key for
+performance." Seed bytes never cross the FFI boundary, period. If
+signing latency is too high, optimize persist's signer (in persist),
 not by caching keys in lens-core's process.
 
 ## 3. Anti-patterns that fail MDD review
@@ -231,14 +236,12 @@ Patterns that have repeatedly failed at sister crates and that
 
 | Category | Mission question | Example |
 |---|---|---|
-| **Scrub correctness** | Did we strip the PII this tier requires? | NER + regex over fixture corpus; assert 21 scrubbed-field map covers every text content slot |
-| **Provenance preservation** | Can a verifier prove what was stored matches what arrived (modulo scrub)? | `original_content_hash` matches sha256 of pre-scrub bytes for every fixture |
 | **Cohort routing** | Did declared-vs-inferred mismatch produce a typed event? | Property test: synthetic trace with declared cohort X + inferred cohort Y → `cohort_declared_inferred_mismatch` event surfaces |
 | **Detector layering** | Does evading one detector fail to evade the others? | Adversarial fixture targets each of 5 ratchet detectors individually; assert other 4 still flag |
 | **Sample-size gate** | Below the gate, is `score=indeterminate` the only path? | Property test: cohort with N rows below gate → score is enum::Indeterminate, never enum::Numeric |
 | **SLO fail-secure** | When SLO is breached, does score_unavailable fire (not pass-through)? | Saturate scoring queue; assert `score_unavailable` flag on every dropped trace |
 | **Cross-version determinism** | Same trace + same state → same score across `lens_core_version` rebuilds? | Build-attestation property test: byte-deterministic detector output on fixture corpus |
-| **FFI boundary** | Does lens-core's heap contain seed bytes during/after sign? | Property test: scan heap during `engine.steward_sign()` call; assert no seed-shaped bytes |
+| **FFI boundary** | Does lens-core's heap contain seed bytes during/after sign? | Property test: scan heap during `engine.local_sign` call; assert no seed-shaped bytes |
 | **Federation determinism** | Two peers with same state agree on which traces are anomalous? | Replay fixture against two `lens-core` instances with identical state; assert detector output is byte-equivalent |
 
 A PR that adds detection without adding the test that answers its
@@ -291,7 +294,7 @@ Same single-source-of-truth discipline persist set with
 | Detector parameters checked into source | LC-AV-14 internals leak via source read | Parameters loaded from CIRIS-RED-incubated config; CI gate rejects PRs that hardcode |
 | All-history centroid baseline replaces sliding window | LC-AV-4 cohort centroid pollution compounds | Sliding-window-only on the recalibration path; era boundary required |
 | Hot-path queue grows unbounded | LC-AV-11 fail-open emerges | Queue type is bounded by construction; drop policy is `score_unavailable` |
-| Steward seed cached in lens-core's process | FFI boundary erosion (parallels persist's AV-25) | Heap-scan property test runs on every release |
+| Signing seed cached in lens-core's process | FFI boundary erosion (parallels persist's AV-25) | Heap-scan property test runs on every release |
 | Detection events silently dropped on persist failure | Federation evidence loss | Best-effort retry queue; never silent drop; alerting on retry-queue depth |
 | Cross-version detection drift unannounced | LC-AV-19 federation-signal noise | `lens_core_version` on every event; per-version aggregation gates |
 
