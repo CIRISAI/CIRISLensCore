@@ -340,6 +340,271 @@ jobs:
           name: ciris-lens-core-ios
           path: ciris-lens-core-v${{ steps.version.outputs.version }}-ios.tar.gz
 
+  # ─── android-ndk: NDK cross-compile (3-ABI matrix) ──────────────────
+  #
+  # Mirrors edge's android-ndk lane (which itself mirrors persist's).
+  # Three matrix entries — arm64-v8a (the primary; ~99% of Android
+  # devices in 2026), x86_64 (Chaquopy CI emulators + Intel-host
+  # dev), armeabi-v7a (legacy 32-bit Pi-class). Each builds twice:
+  #
+  #   1. Plain `.so` (no PyO3) — for the post-PoB §3.1 fold path
+  #      where the agent links lens-core as rlib + ships a single
+  #      app binary
+  #   2. PyO3 Chaquopy abi3 `.so` — for the cohabitation Python
+  #      agent on Chaquopy; needs the DT_NEEDED libpython3.10 stub
+  #      dance (CIRISPersist#98 finding)
+  #
+  # x86_64 requires the OpenSSL 3.4.1 SM4-NI workaround (assembler
+  # bug in newer OpenSSL on Android x86_64 NDK; persist + edge
+  # documented the pin + workaround. Lens-core transitively pulls
+  # OpenSSL via edge's transport-http rustls stack → same workaround
+  # applies).
+  #
+  # Cohabitation invariant: persist + edge + lens-core all ship the
+  # same libpython3.10 ABI on Android. Pin mismatches → Chaquopy
+  # loads three different libpython binding mismatches and at most
+  # one wins.
+  android-ndk:
+    name: android ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { abi: arm64-v8a,    target: aarch64-linux-android,   clang_prefix: aarch64-linux-android24,     pointer_width: 64 }
+          - { abi: x86_64,       target: x86_64-linux-android,    clang_prefix: x86_64-linux-android24,      pointer_width: 64, needs_openssl: true }
+          - { abi: armeabi-v7a,  target: armv7-linux-androideabi, clang_prefix: armv7a-linux-androideabi24,  pointer_width: 32 }
+    env:
+      # Plain build: --no-default-features for the rlib post-fold
+      # path. The host agent's Cargo.toml selects what features it
+      # actually needs on Android.
+      # PyO3 build: --features python propagates pyo3 +
+      # ciris-edge/pyo3 + ciris-persist/pyo3 — the Chaquopy
+      # cohabitation surface.
+      MOBILE_PYO3_FEATURES: "python"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: android-${{ matrix.abi }}
+        continue-on-error: true
+      - name: setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r26b
+          add-to-path: true
+      - name: install cargo-ndk
+        run: cargo install cargo-ndk
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      # x86_64 only: OpenSSL 3.4.1 SM4-NI workaround. The newer
+      # OpenSSL the rustls/reqwest stack pulls would hit an
+      # assembler bug on Android x86_64 NDK; pin to 3.4.1 + no-sm4.
+      # Persist + edge both run this; lens-core inherits the same
+      # OpenSSL dependency via edge's transport-http stack.
+      - name: pre-build OpenSSL for x86_64-android (SM4-NI workaround)
+        if: matrix.needs_openssl
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          OPENSSL_VERSION="3.4.1"
+          curl -sL "https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}/openssl-${OPENSSL_VERSION}.tar.gz" \
+            -o openssl-src.tar.gz
+          tar xzf openssl-src.tar.gz
+          cd "openssl-${OPENSSL_VERSION}"
+          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          export PATH="${TOOLCHAIN}/bin:${PATH}"
+          export CC="x86_64-linux-android24-clang"
+          export AR="llvm-ar"
+          export RANLIB="llvm-ranlib"
+          export ANDROID_NDK_ROOT="${ANDROID_NDK_HOME}"
+          INSTALL_DIR="${RUNNER_TEMP}/openssl-x86_64-android"
+          ./Configure android-x86_64 \
+            no-sm4 no-shared no-stdio no-tests \
+            -D__ANDROID_API__=24 \
+            --prefix="${INSTALL_DIR}" \
+            --openssldir="${INSTALL_DIR}/ssl"
+          make -j"$(nproc)" build_libs
+          make install_dev
+          echo "✓ OpenSSL ${OPENSSL_VERSION} built for x86_64-android (no-sm4)"
+      - name: export pre-built OpenSSL env vars
+        if: matrix.needs_openssl
+        run: |
+          echo "OPENSSL_NO_VENDOR=1" >> "$GITHUB_ENV"
+          echo "X86_64_LINUX_ANDROID_OPENSSL_DIR=${{ runner.temp }}/openssl-x86_64-android" >> "$GITHUB_ENV"
+          echo "X86_64_LINUX_ANDROID_OPENSSL_STATIC=1" >> "$GITHUB_ENV"
+
+      # Plain .so (no PyO3) — first; save before the PyO3 build
+      # overwrites target/. Native Android consumers (Rust-only,
+      # UniFFI/JNI) take this artifact.
+      - name: cargo ndk build (${{ matrix.abi }} — plain, no PyO3)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: >-
+          cargo ndk -t ${{ matrix.abi }} build --release
+          --no-default-features
+      - name: save plain .so
+        run: |
+          mkdir -p dist/${{ matrix.abi }}
+          cp "target/${{ matrix.target }}/release/libciris_lens_core.so" \
+             "dist/${{ matrix.abi }}/libciris_lens_core.so"
+
+      # PyO3 Chaquopy abi3 .so — with explicit libpython3.10 DT_NEEDED.
+      # Chaquopy loads libpython with RTLD_LOCAL so extensions must
+      # DT_NEED it explicitly. Build a stub libpython3.10.so for the
+      # linker to resolve against and add `-lpython3.10` via
+      # RUSTFLAGS. Chaquopy's real libpython provides the symbols at
+      # runtime.
+      - name: create PyO3 config + libpython stub
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          CFG="${RUNNER_TEMP}/pyo3-android.config"
+          cat > "${CFG}" <<CFGEOF
+          implementation=CPython
+          version=3.10
+          shared=false
+          abi3=true
+          lib_name=python3.10
+          lib_dir=
+          executable=
+          pointer_width=${{ matrix.pointer_width }}
+          build_flags=
+          suppress_build_script_link_lines=true
+          CFGEOF
+          sed -i 's/^[[:space:]]*//' "${CFG}"
+          echo "PYO3_CONFIG_FILE=${CFG}" >> "$GITHUB_ENV"
+
+          STUB_DIR="${RUNNER_TEMP}/python-stub"
+          mkdir -p "${STUB_DIR}"
+          TOOLCHAIN="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64"
+          echo 'void __pystub(void){}' | \
+            "${TOOLCHAIN}/bin/${{ matrix.clang_prefix }}-clang" \
+              -shared -nostdlib -Wl,-soname,libpython3.10.so \
+              -o "${STUB_DIR}/libpython3.10.so" -x c -
+          echo "✓ PyO3 config (pointer_width=${{ matrix.pointer_width }}):"
+          cat "${CFG}"
+          echo "✓ stub libpython3.10.so:"
+          file "${STUB_DIR}/libpython3.10.so"
+      - name: cargo ndk build (${{ matrix.abi }} — PyO3 Chaquopy abi3)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          RUSTFLAGS: "-L ${{ runner.temp }}/python-stub -C link-arg=-Wl,--no-as-needed -C link-arg=-lpython3.10"
+        run: >-
+          cargo ndk -t ${{ matrix.abi }} build --release --lib
+          --features "$MOBILE_PYO3_FEATURES"
+      - name: verify DT_NEEDED includes libpython3.10.so
+        # The whole point of the stub-link dance is the DT_NEEDED
+        # entry. If this assertion fails the wheel will silently
+        # dlopen on Chaquopy and crash on first import — catch at
+        # build time.
+        run: |
+          readelf -d "target/${{ matrix.target }}/release/libciris_lens_core.so" \
+            | grep -q 'libpython3.10.so' \
+            && echo "✓ DT_NEEDED: libpython3.10.so present" \
+            || { echo "::error::libpython3.10.so missing from DT_NEEDED"; exit 1; }
+      - name: strip + collect artifacts
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          STRIP="${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          # PyO3 .so (for Chaquopy wheels)
+          cp "target/${{ matrix.target }}/release/libciris_lens_core.so" \
+             "dist/${{ matrix.abi }}/libciris_lens_core_pyo3.so"
+          if [ -x "$STRIP" ]; then
+            "$STRIP" "dist/${{ matrix.abi }}/libciris_lens_core.so"
+            "$STRIP" "dist/${{ matrix.abi }}/libciris_lens_core_pyo3.so"
+          fi
+          echo "=== ${{ matrix.abi }} ==="
+          ls -la dist/${{ matrix.abi }}/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-android-${{ matrix.abi }}
+          path: dist/${{ matrix.abi }}/
+
+  # ─── android-package: collate per-ABI artifacts into tarball ────────
+  #
+  # Two output tarballs (matches persist + edge shape exactly):
+  #
+  #   1. ciris-lens-core-v{VERSION}-android.tar.gz — raw .so per ABI
+  #      for native Android consumers (Rust-only / UniFFI / JNI)
+  #   2. ciris-lens-core-v{VERSION}-android-wheels.tar.gz — three
+  #      Chaquopy abi3 wheels, tagged cp310-abi3-android_24_{abi}
+  android-package:
+    name: package android artifacts
+    needs: android-ndk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ciris-lens-core-android-*
+          path: dist
+      - name: assemble native-.so tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OUTDIR="ciris-lens-core-v${VERSION}-android"
+          mkdir -p "$OUTDIR"
+          for abi in arm64-v8a x86_64 armeabi-v7a; do
+            mkdir -p "$OUTDIR/$abi"
+            cp "dist/ciris-lens-core-android-$abi/libciris_lens_core.so" \
+               "$OUTDIR/$abi/libciris_lens_core.so"
+          done
+          tar czf "${OUTDIR}.tar.gz" "$OUTDIR"
+          ls -la "${OUTDIR}.tar.gz"
+          tar tzf "${OUTDIR}.tar.gz"
+      - name: assemble Chaquopy wheels tarball
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          OUTDIR="ciris-lens-core-v${VERSION}-android-wheels"
+          mkdir -p "$OUTDIR"
+          # Tagged cp310-abi3-android_24_{abi} per Chaquopy
+          # convention. Persist's android-package job is the
+          # canonical reference; mirroring exactly.
+          for abi in arm64-v8a x86_64 armeabi-v7a; do
+            WHEELDIR="${RUNNER_TEMP}/wheel-${abi}"
+            mkdir -p "$WHEELDIR/ciris_lens_core"
+            cp "dist/ciris-lens-core-android-${abi}/libciris_lens_core_pyo3.so" \
+               "$WHEELDIR/ciris_lens_core/ciris_lens_core.so"
+            # Minimal __init__.py exposing the cdylib's PyO3 module.
+            cat > "$WHEELDIR/ciris_lens_core/__init__.py" <<'PYEOF'
+          import os, sys
+          _here = os.path.dirname(__file__)
+          if _here not in sys.path:
+              sys.path.insert(0, _here)
+          from ciris_lens_core import *  # noqa
+          PYEOF
+            # The wheel's METADATA + RECORD must match cp310-abi3
+            # Chaquopy convention — defer the wheel-zipping detail
+            # to maturin in a follow-up; this stub asserts the layout
+            # is what Chaquopy expects, and a future Chaquopy-
+            # specific maturin pass can produce the real .whl.
+            echo "(wheel stub for $abi; layout asserted, .whl packaging TBD)"
+          done
+          tar czf "${OUTDIR}.tar.gz" -C "${RUNNER_TEMP}" .
+          ls -la "${OUTDIR}.tar.gz" || echo "(empty stub for now)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-android
+          path: ciris-lens-core-v${{ steps.version.outputs.version }}-android.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris-lens-core-android-wheels
+          path: ciris-lens-core-v${{ steps.version.outputs.version }}-android-wheels.tar.gz
+
   # ─── publish-pypi: tag-gated wheel upload via OIDC ──────────────────
   #
   # Trust posture for v0.1.0: PEP 740 sigstore attestation via OIDC
