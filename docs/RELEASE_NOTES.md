@@ -1,5 +1,76 @@
 # CIRISLensCore Release Notes
 
+# v0.4.0 — persist v4.0.1 + edge v1.2.0 substrate floor (Data Access Surface cut)
+
+**2026-06-06** — Cohabitation pin bump consuming the CIRISPersist v4.0
+Data Access Surface cut + CIRISEdge v1.2.0. This is the §15.5
+consumer-migration-cascade landing for lens-core — the first lens-core
+release that relaxes the persist floor from `==3.14.3` to `==4.0.1`,
+re-admitting lens-core to the CIRISConformance cohabitation matrix
+(which dropped it at v0.3.0 pending this bump).
+
+## What changed
+
+**Federation pins:**
+
+| Crate | v0.3.0 | v0.4.0 |
+|---|---|---|
+| `ciris-persist` | v3.14.3 (Cargo + pyproject `==`) | **v4.0.1** |
+| `ciris-edge` | v1.1.11 | **v1.2.0** |
+| `ciris-verify` (transitive) | v4.8.0 | v4.8.0 (unchanged) |
+
+**Source changes: none.** This is a pure pin bump. The persist v4.0 cut
+is a hard break for *read-surface consumers* — `src/read/*` reorganized
+into topic-named `ceg::*` namespaces, every scope-protected read gained
+a `CallerScope` argument, `Error::NotImplemented` removed. But lens-core
+consumes **none of the reorganized surface**:
+
+- Calibration-bundle reads go through `ciris_persist::derived::*`
+  (`CalibrationBundle`, `CohortCentroid`, `ProjectionMetadata`,
+  `Standardization`), which the v4.0 cut explicitly kept in place —
+  `derived/` is a consumer-facing artifact axis, NOT part of the
+  scope-protected `ceg/` read reorganization.
+- Detection-event reads go through `Engine::get_detection_events(filter)`
+  — unchanged signature; no `CallerScope` param.
+- The relay write path goes through `Engine::receive_and_persist(bytes,
+  scrubber)` — unchanged signature. The new write-path admission gate
+  (AV-45 closure) derives the writer's admission from the verified
+  envelope signer *inside* the call; no new parameter crosses the API.
+
+The full test suite (120 tests) passes on both the rlib and python
+feature paths against v4.0.1 with zero code modification.
+
+## Why lens-core influenced the v4.0 cut
+
+Lens-core's consumer review on CIRISPersist#160 pushed back on the
+original FSD's deferral of write-path cohort_scope to v4.1. That
+critique was accepted and folded into v4.0: the AV-44 (read-side
+escalation) ↔ AV-45 (write-side downgrade) asymmetry would have
+collapsed the §9 defense-in-depth claim on the write side. Both attack
+vectors now close by construction in v4.0.1. The cache time-bucket
+soundness gap and admission-resolution caching (§7.5) also came out of
+that review.
+
+## Cohabitation contract
+
+Unchanged surface: `install_relay(edge)`, `LensCore::attach_handler`,
+`LensCore::relay`, `process_trace_batch`, the v0.1.x 4-function
+drop-in. `PROJECTION_VERSION` still `crc-v1`. The single difference a
+cohabiting agent sees: the shared process must now construct a persist
+**v4.0.1** Engine + edge **v1.2.0** — a host pinned to persist v3.x can
+no longer cohabit a lens-core v0.4.0 handler (single-version contract).
+
+## Upgrade path
+
+`pip install --upgrade ciris-lens-core` — but note the exact-pin
+cohabitation contract: the deployed `ciris_persist` wheel must be
+v4.0.1 and `ciris_edge` v1.2.0 for the shared-engine process. The
+federation cascade (persist v4.0.1 → edge v1.2.0 → **lens-core v0.4.0**
+→ nodecore / agent / bridge) moves the whole tree to the v4 substrate
+floor together.
+
+---
+
 # v0.3.0 — RATCHET `crc-v1` calibration bundle consumption (#3 partial close)
 
 **2026-06-05** — Minor release. CIRISAI/RATCHET shipped its initial
