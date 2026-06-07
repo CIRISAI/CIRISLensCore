@@ -1,5 +1,57 @@
 # CIRISLensCore Release Notes
 
+# v0.4.1 — persist v4.1.0 + edge v1.2.1 + verify v4.8.1 substrate floor (streaming cut)
+
+**2026-06-07** — Patch release tracking the next substrate-floor move:
+the CIRISPersist v4.1.0 streaming-substrate cut (CEG 0.10 §10.5) + the
+CIRISEdge v1.2.1 + CIRISVerify v4.8.1 cascade. Like v0.4.0, this is a
+**pure pin bump — zero source changes**.
+
+## What changed
+
+| Crate | v0.4.0 | v0.4.1 |
+|---|---|---|
+| `ciris-persist` | v4.0.1 (Cargo + pyproject `==`) | **v4.1.0** |
+| `ciris-edge` | v1.2.0 | **v1.2.1** |
+| `ciris-verify` (keyring + crypto) | v4.8.0 | **v4.8.1** |
+
+**persist v4.1.0** is the streaming substrate — `get_blob_range`,
+`BlobBody::ChunkDag`, `federation_stream_chunks`, per-stream
+transparency log (producer-signed STH + RFC 6962 proofs), STREAM-nonce
+AES-256-GCM chunk sealing, and `key_grant` stream/epoch addressing
+(migrations V061–V064). It implements CEG 0.10 §10.5 blob streaming.
+
+**verify v4.8.1** fixes the Android probe semantic + decouples local
+checks from the network race (closes CIRISVerify#56).
+
+**Lens-core consumes none of it.** The streaming primitives are a new
+substrate axis lens-core doesn't touch — it still reads
+`ciris_persist::derived::*` (calibration bundles + detection events) +
+the unchanged `Engine` facade methods. The full 120-test suite passes
+on both the rlib and python feature paths against the v4.1.0 substrate
+with zero code modification; fmt + clippy clean.
+
+## Cohabitation contract
+
+Unchanged surface (`install_relay`, `LensCore::attach_handler`,
+`LensCore::relay`, `process_trace_batch`, the v0.1.x drop-in;
+`PROJECTION_VERSION` still `crc-v1`). The exact-pin moves
+`ciris-persist==4.0.1` → `==4.1.0`: a cohabiting host must now
+construct a persist **v4.1.0** Engine + edge **v1.2.1**. The federation
+cascade (persist v4.1.0 → edge v1.2.1 → **lens-core v0.4.1** →
+nodecore/agent/bridge) moves the tree to the streaming-substrate floor
+together. Re-admits lens-core to the CIRISConformance matrix (dropped
+again at v0.4.0 pending this bump — same shape as the 0.3.0 → 0.4.0
+cycle, persist-minor floor this time rather than persist-major).
+
+## Upgrade path
+
+`pip install --upgrade ciris-lens-core` — the deployed `ciris_persist`
+wheel must be v4.1.0 and `ciris_edge` v1.2.1 for the shared-engine
+process (exact-pin cohabitation contract).
+
+---
+
 # v0.4.0 — persist v4.0.1 + edge v1.2.0 substrate floor (Data Access Surface cut)
 
 **2026-06-06** — Cohabitation pin bump consuming the CIRISPersist v4.0
