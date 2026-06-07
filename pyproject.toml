@@ -26,7 +26,7 @@ classifiers = [
 # console scripts). Deployed lens + agent get one install command for
 # the whole lens+persist+verify stack.
 #
-# EXACT pin to v4.0.1 — the CIRIS 3.0 in-process cohabitation
+# EXACT pin to v4.1.0 — the CIRIS 3.0 in-process cohabitation
 # convergence pin (CIRISLensCore#22). For agent + NodeCore + LensCore
 # co-resident in one process, every consumer must link ONE identical
 # ciris-persist: a single tokio runtime, a single process-singleton
@@ -34,21 +34,23 @@ classifiers = [
 # different patch than NodeCore/agent and break the singleton.
 # Exact `==` is the contract.
 #
-# v4.0.1 is the live CIRIS 3.0 cohabitation convergence point — the
-# Data Access Surface v4 cut (§15.5 consumer-migration cascade).
-# CIRISEdge v1.2.0 already moved here (metadata-only, zero source
-# changes consuming the v4 substrate); CIRISNodeCore + CIRISAgent
-# re-target the identical v4.0.1. v4.0 reorganizes the read surface
-# under topic-named `ceg::*` namespaces + adds the CallerScope
-# admission substrate (AV-44 read-side + AV-45 write-side
-# cohort_scope gating, both closed by construction). Lens-core's
-# own surface is unaffected by the reorg — it consumes `derived::*`
-# (calibration bundles + detection-event reads) + the `Engine`
-# facade methods, NONE of which moved or changed signature in v4.0;
-# the migration was a pure pin bump (zero source changes), validated
-# by the full test suite green on both rlib + python paths. verify
-# v4.8.0 is transitive via persist + edge — single version across
-# the federation tree.
+# v4.1.0 is the live CIRIS 3.0 cohabitation convergence point — the
+# streaming-substrate cut (CEG 0.10 §10.5: chunked blobs, per-stream
+# transparency log, STREAM-nonce AES-256-GCM sealing, key_grant
+# stream/epoch addressing) on top of the v4.0 Data Access Surface cut.
+# CIRISEdge v1.2.1 already moved here (consuming persist v4.1.0 +
+# CIRISVerify v4.8.1); CIRISNodeCore + CIRISAgent re-target the
+# identical v4.1.0. v4.0 reorganized the read surface under
+# topic-named `ceg::*` namespaces + added the CallerScope admission
+# substrate (AV-44 read-side + AV-45 write-side cohort_scope gating,
+# both closed by construction); v4.1 adds the streaming primitives.
+# Lens-core's own surface is unaffected by either cut — it consumes
+# `derived::*` (calibration bundles + detection-event reads) + the
+# `Engine` facade methods, NONE of which moved or changed signature
+# across v4.0 → v4.1; every bump was a pure pin bump (zero source
+# changes), validated by the full test suite green on both rlib +
+# python paths. verify v4.8.1 is transitive via persist + edge —
+# single version across the federation tree.
 #
 # DEPLOYMENT NOTE — libtss2: persist v1.10.0 (CIRISPersist#87)
 # auto-enables ciris-keyring's `tpm` feature for Linux targets;
@@ -59,7 +61,7 @@ classifiers = [
 # Lens-core's CI installs `libtss2-dev` on its Linux jobs (mirrors
 # CIRISEdge#12). Re-pin in lockstep with edge + NodeCore + agent.
 dependencies = [
-    "ciris-persist==4.0.1",
+    "ciris-persist==4.1.0",
 ]
 dynamic = ["version"]
 
