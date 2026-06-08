@@ -31,5 +31,10 @@
 //!   shim; CIRISAgent `tests/adapters/accord_metrics/` parity.
 
 pub mod event;
+pub mod partial;
 
 pub use event::{ComponentType, ReasoningEventType};
+pub use partial::{
+    CaptureOutcome, CompleteTrace, InboundEvent, PartialTraceStore, TraceComponent,
+    TRACE_SCHEMA_VERSION,
+};
