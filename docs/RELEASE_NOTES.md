@@ -1,5 +1,53 @@
 # CIRISLensCore Release Notes
 
+# v0.4.4 — persist v4.9.0 + edge v1.4.1 + verify v5.0.0 (CEG 1.0 / Agent 3.0 substrate)
+
+**2026-06-09** — Cascade-catch-up onto the **CEG 1.0 / Agent 3.0**
+substrate triple: persist v4.4.0 → **v4.9.0**, edge v1.3.2 → **v1.4.1**,
+verify v4.11.0 → **v5.0.0** (a verify MAJOR). Pure pin bump — zero
+source changes.
+
+## What changed
+
+| Crate | v0.4.3 | v0.4.4 |
+|---|---|---|
+| `ciris-persist` | v4.4.0 (Cargo + pyproject `==`) | **v4.9.0** |
+| `ciris-edge` | v1.3.2 | **v1.4.1** |
+| `ciris-verify` (keyring + crypto) | v4.11.0 (`version "4"`) | **v5.0.0** (`version "5"`) |
+
+**The verify MAJOR (4→5) is additive for lens-core.** CIRISVerify
+v5.0.0 is the "CEG 1.0 / Agent 3.0 substrate release" — the major
+marks the milestone, but its code changes are additive (a
+`boundary_degraded` attestation distinct from `hardware_trust_degraded`;
+a `jcs_canonicalize` Python binding — the JCS RFC-8785 canonicalizer
+that the v4.4 attestation `promote` phase 2 needed, CIRISVerify#59).
+The `ciris_keyring` / `ciris_crypto` API lens-core links for its relay
+transport-signing identity (`LocalSigner`, `load_local_seed`,
+`sign_ml_dsa_65`, `LocalSignerError`) is unchanged. Lens-core's Cargo
+`ciris-keyring` pin moves `version "4"` → `"5"` to track the major; the
+full rlib + python build + 120-test suite is green against the new
+triple, single-version lockfile re-resolve (no skew).
+
+persist v4.4.0 → v4.9.0 (5 minors of substrate work atop the v4.4 CEG
+attestation surface) is also off lens-core's path — it consumes
+`ciris_persist::derived::*` + the unchanged `Engine` facades.
+
+## Cohabitation contract
+
+Unchanged surface (`install_relay`, `LensCore::attach_handler`,
+`LensCore::relay`, `process_trace_batch`, the v0.1.x drop-in;
+`PROJECTION_VERSION` still `crc-v1`). Exact-pin moves
+`ciris-persist==4.4.0` → `==4.9.0`: a cohabiting host must construct a
+persist **v4.9.0** Engine + edge **v1.4.1** (linking verify **v5.0.0**).
+
+## Upgrade path
+
+`pip install --upgrade ciris-lens-core` — the deployed `ciris_persist`
+wheel must be v4.9.0 and `ciris_edge` v1.4.1 for the shared-engine
+process (exact-pin cohabitation contract).
+
+---
+
 # v0.4.3 — persist v4.4.0 (CEG attestation surface) + edge v1.3.2 + verify v4.11.0
 
 **2026-06-08** — Cascade-catch-up patch onto the v4.4 substrate floor:
