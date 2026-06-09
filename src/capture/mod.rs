@@ -32,9 +32,11 @@
 
 pub mod event;
 pub mod partial;
+pub mod seal;
 
 pub use event::{ComponentType, ReasoningEventType};
 pub use partial::{
     CaptureOutcome, CompleteTrace, InboundEvent, PartialTraceStore, TraceComponent,
     TRACE_SCHEMA_VERSION,
 };
+pub use seal::{build_canonical_envelope, canonical_bytes, strip_empty};
