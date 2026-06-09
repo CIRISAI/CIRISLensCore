@@ -1,6 +1,6 @@
 [package]
 name = "ciris-lens-core"
-version = "0.4.2"
+version = "0.4.4"
 edition = "2021"
 description = "Science-layer runtime for the CIRIS federation: cohort-routes, scores manifold conformity, signs detection events"
 license = "AGPL-3.0-or-later"
@@ -25,17 +25,18 @@ crate-type = ["cdylib", "rlib"]
 #
 # OQ-01 closure 2026-05-03: rlib primary, PyO3 cdylib via `python`
 # feature for the deployed-lens cutover.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v4.3.0", version = "4", features = ["extract", "sqlite"] }
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v1.3.1", version = "1", features = ["transport-http"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v4.9.0", version = "4", features = ["extract", "sqlite"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v1.4.1", version = "1", features = ["transport-http"] }
 
 # Keyring — relay mode (CIRISLensCore#10) loads its Edge transport-
 # signing identity via `ciris_keyring::load_local_seed`. Edge's
 # `LocalSigner` is keyring-trait-object based (Arc<dyn HardwareSigner>
 # + Arc<dyn PqcSigner>), distinct from persist's raw-seed LocalSigner;
 # the two are not interchangeable, so the relay loads its own. Same
-# CIRISVerify tag persist + edge pin (v4.10.0) — single verify version.
+# CIRISVerify tag persist + edge pin (v5.0.0 — CEG 1.0 / Agent 3.0 substrate
+# release; MAJOR 4→5 but additive for lens-core) — single verify version.
 # features mirror edge's keyring pin exactly.
-ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v4.10.0", version = "4", features = ["software", "pqc-ml-dsa"] }
+ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.0.0", version = "5", features = ["software", "pqc-ml-dsa"] }
 
 # persist's `sqlite` feature: relay mode persists inbound batches via
 # `Engine::receive_and_persist` + reads `Engine::sqlite_backend()` for
