@@ -1,5 +1,61 @@
 # CIRISLensCore Release Notes
 
+# v0.4.2 — persist v4.3.0 + edge v1.3.1 + verify v4.10.0 substrate floor
+
+**2026-06-08** — Cascade-catch-up patch onto the finalized substrate
+floor: persist v4.1.0 → **v4.3.0**, edge v1.2.1 → **v1.3.1**, verify
+v4.8.1 → **v4.10.0**. Pure pin bump — zero source changes.
+
+## What changed
+
+| Crate | v0.4.1 | v0.4.2 |
+|---|---|---|
+| `ciris-persist` | v4.1.0 (Cargo + pyproject `==`) | **v4.3.0** |
+| `ciris-edge` | v1.2.1 | **v1.3.1** |
+| `ciris-verify` (keyring + crypto) | v4.8.1 | **v4.10.0** |
+
+persist v4.1.0 → v4.3.0 continues the streaming-substrate line (the
+v4.1 CEG 0.10 §10.5 chunked-blob / transparency-log / AES-256-GCM
+work, extended through the v4.2/v4.3 cuts) and re-pins to verify
+v4.10.0. edge v1.3.1 consumes persist v4.3.0 + verify v4.10.0. None of
+it is on lens-core's path — lens-core reads `ciris_persist::derived::*`
+(calibration bundles + detection events) + the unchanged `Engine`
+facades, so the migration is a clean pin bump (full 120-test suite
+green on both rlib + python; clean single-version lockfile re-resolve,
+no dual-persist/verify skew).
+
+**Note:** CIRISVerify v4.11.0 exists, but edge v1.3.1 pins verify
+v4.10.0 — lens-core matches the released substrate at v4.10.0 rather
+than chasing ahead of the cascade (same discipline as the v4.8.1 hold
+at v0.4.1).
+
+## Cohabitation contract
+
+Unchanged surface (`install_relay`, `LensCore::attach_handler`,
+`LensCore::relay`, `process_trace_batch`, the v0.1.x drop-in;
+`PROJECTION_VERSION` still `crc-v1`). Exact-pin moves
+`ciris-persist==4.1.0` → `==4.3.0`: a cohabiting host must construct a
+persist **v4.3.0** Engine + edge **v1.3.1**. Re-admits lens-core to the
+CIRISConformance matrix (which had advanced to the persist v4.3.0 floor
+ahead of lens-core; v0.4.1's `==4.1.0` pin was incompatible).
+
+## Federation timing
+
+Edge was the gating sister this cycle — persist jumped 4.1.0 → 4.3.0
+(pulling verify 4.10.0) while edge stayed on the 4.1.0 floor, so
+lens-core held to avoid a dual-version skew. Once edge v1.3.1 shipped
+consuming persist v4.3.0, the floor was coherent and lens-core caught
+up. Cascade order held: persist → edge → **lens-core** →
+nodecore/agent/bridge.
+
+## Upgrade path
+
+`pip install --upgrade ciris-lens-core` — the deployed `ciris_persist`
+wheel must be v4.3.0 and `ciris_edge` v1.3.1 for the shared-engine
+process (exact-pin cohabitation contract).
+
+---
+
 # v0.4.1 — persist v4.1.0 + edge v1.2.1 + verify v4.8.1 substrate floor (streaming cut)
 
 **2026-06-07** — Patch release tracking the next substrate-floor move:
