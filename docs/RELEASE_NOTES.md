@@ -1,5 +1,50 @@
 # CIRISLensCore Release Notes
 
+# v0.4.5 — persist v4.10.0 + edge v1.5.0 + verify v5.0.0
+
+**2026-06-09** — Cascade-catch-up onto the persist v4.10.0 / edge v1.5.0
+floor. Pure pin bump — zero source changes.
+
+## What changed
+
+| Crate | v0.4.4 | v0.4.5 |
+|---|---|---|
+| `ciris-persist` | v4.9.0 (Cargo + pyproject `==`) | **v4.10.0** |
+| `ciris-edge` | v1.4.1 | **v1.5.0** |
+| `ciris-verify` (keyring + crypto) | v5.0.0 | v5.0.0 (unchanged) |
+
+**persist v4.10.0** ships the CEG 0.8 §0.8.1 `location_proof` substrate
+(V068 `federation_location_proofs` + H3 ≤7 resolution enforcement,
+CIRISPersist#154) — off lens-core's path. It also **fixes the pyproject
+`ciris-verify` ceiling** (`<5` → `>=5.0.0,<6`), which unblocks the
+CIRISConformance matrix from carrying `ciris-verify==5.0.0` (the
+`ResolutionImpossible` that parked the v0.4.4 matrix re-add is resolved
+at the root).
+
+**edge v1.5.0** is the first version-stable replication line
+(`FSD/REPLICATION_WIRE_FORMAT_V1.md` — 10-variant `EnvelopeKind`,
+`WIRE_PROTOCOL_VERSION=0x01`, strict v1 parser). That replication wire
+lockdown is off lens-core's path — lens-core uses edge's
+`transport-http` + `Handler<AccordEventsBatch>` surface, unchanged. The
+full 120-test suite is green on rlib + python against the new triple;
+clippy + fmt clean; single-version lockfile re-resolve (no skew).
+
+## Cohabitation contract
+
+Unchanged surface (`install_relay`, `LensCore::attach_handler`,
+`LensCore::relay`, `process_trace_batch`, the v0.1.x drop-in;
+`PROJECTION_VERSION` still `crc-v1`). Exact-pin moves
+`ciris-persist==4.9.0` → `==4.10.0`: a cohabiting host must construct a
+persist **v4.10.0** Engine + edge **v1.5.0**.
+
+## Upgrade path
+
+`pip install --upgrade ciris-lens-core` — the deployed `ciris_persist`
+wheel must be v4.10.0 and `ciris_edge` v1.5.0 for the shared-engine
+process (exact-pin cohabitation contract).
+
+---
+
 # v0.4.4 — persist v4.9.0 + edge v1.4.1 + verify v5.0.0 (CEG 1.0 / Agent 3.0 substrate)
 
 **2026-06-09** — Cascade-catch-up onto the **CEG 1.0 / Agent 3.0**
