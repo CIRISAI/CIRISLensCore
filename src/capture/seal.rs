@@ -158,6 +158,63 @@ pub fn canonical_bytes(trace: &CompleteTrace) -> Result<Vec<u8>, String> {
         .map_err(|e| format!("canonicalize trace: {e}"))
 }
 
+// ── Signature application + verification ────────────────────────────
+//
+// Trace signing is **Ed25519-only** over the canonical bytes (NOT a
+// hybrid Ed25519+ML-DSA pair — that is the detection-event / attestation
+// surface). The signature is stored URL-safe-base64-no-pad, the
+// `signature_key_id` names the signing key. This mirrors CIRISAgent's
+// `Ed25519TraceSigner.sign_trace` (`unified_key.sign_base64(message)`) +
+// `verify_trace` (`Ed25519.verify(sig, message)`) exactly, so a trace
+// lens-core seals verifies under the agent's verify path and vice-versa.
+
+/// Encode an Ed25519 signature for the `CompleteTrace.signature` field:
+/// URL-safe base64, no padding — the form CIRISAgent's `verify_trace`
+/// decodes (it re-appends `==` before `urlsafe_b64decode`).
+pub fn encode_signature(sig_bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sig_bytes)
+}
+
+/// Stamp a computed signature onto a sealed trace. Pure — the caller
+/// (the Engine-coupled `sign_trace`, Cut 3b glue) obtains `sig_bytes`
+/// from `engine.local_sign(canonical_bytes(trace))` and the host's
+/// signing `key_id`.
+pub fn apply_signature(trace: &mut CompleteTrace, sig_bytes: &[u8], key_id: &str) {
+    trace.signature = Some(encode_signature(sig_bytes));
+    trace.signature_key_id = Some(key_id.to_string());
+}
+
+/// Verify a sealed trace's Ed25519 signature against `verifying_key`,
+/// recomputing the canonical bytes (sign/verify can never drift — both
+/// go through [`canonical_bytes`]). Returns `false` on any failure
+/// (missing/garbled signature, canonicalization error, bad signature) —
+/// the same fail-closed shape as CIRISAgent's `verify_trace`. This is
+/// the federation-verifier algorithm; a trace lens-core seals must pass
+/// it under the producer's public key.
+pub fn verify_trace_signature(
+    trace: &CompleteTrace,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+) -> bool {
+    use base64::Engine as _;
+    use ed25519_dalek::Verifier;
+
+    let Some(sig_b64) = &trace.signature else {
+        return false;
+    };
+    let Ok(sig_raw) = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(sig_b64) else {
+        return false;
+    };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_raw.as_slice()) else {
+        return false;
+    };
+    let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
+    let Ok(message) = canonical_bytes(trace) else {
+        return false;
+    };
+    verifying_key.verify(&message, &signature).is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +398,81 @@ mod tests {
             r#""trace_level":"GENERIC","trace_schema_version":"2.7.9"}"#
         );
         assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn encode_signature_is_urlsafe_no_pad() {
+        // 64-byte Ed25519 sig → 86-char URL-safe base64, no '=' padding,
+        // no '+'/'/' (the form the agent's verify_trace decodes).
+        let sig = [0xFBu8; 64];
+        let enc = encode_signature(&sig);
+        assert_eq!(enc.len(), 86);
+        assert!(!enc.contains('='));
+        assert!(!enc.contains('+') && !enc.contains('/'));
+    }
+
+    #[test]
+    fn sign_verify_round_trip_matches_agent_algorithm() {
+        // The signature-critical end-to-end proof, no Engine needed:
+        // Ed25519-sign canonical_bytes, stamp via apply_signature, and
+        // verify_trace_signature (recompute canonical + Ed25519-verify)
+        // passes — exactly CIRISAgent's sign_trace/verify_trace pair.
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]); // deterministic, no rng
+        let vk = sk.verifying_key();
+
+        let mut t = sealed_trace();
+        let msg = canonical_bytes(&t).expect("canonicalize");
+        let sig = sk.sign(&msg);
+        apply_signature(&mut t, &sig.to_bytes(), "agent-unified-key");
+
+        assert_eq!(t.signature_key_id.as_deref(), Some("agent-unified-key"));
+        assert!(
+            verify_trace_signature(&t, &vk),
+            "freshly signed trace must verify"
+        );
+    }
+
+    #[test]
+    fn tampering_any_signed_field_invalidates() {
+        // Mutating ANY canonical field after signing must break verify —
+        // that's the whole point of binding provenance into the bytes.
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[9u8; 32]);
+        let vk = sk.verifying_key();
+
+        let mut t = sealed_trace();
+        let sig = sk.sign(&canonical_bytes(&t).unwrap());
+        apply_signature(&mut t, &sig.to_bytes(), "k");
+        assert!(verify_trace_signature(&t, &vk));
+
+        // Tamper the trace_id (a top-level signed field).
+        let mut tampered = t.clone();
+        tampered.trace_id = "swapped".into();
+        assert!(!verify_trace_signature(&tampered, &vk));
+
+        // Tamper a component's data (inside the signed components array).
+        let mut tampered2 = t.clone();
+        tampered2.components[0].data = json!({"thought": "EVIL"});
+        assert!(!verify_trace_signature(&tampered2, &vk));
+
+        // Wrong key fails too.
+        let other = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
+        assert!(!verify_trace_signature(&t, &other));
+    }
+
+    #[test]
+    fn verify_fails_closed_on_missing_or_garbled_signature() {
+        use ed25519_dalek::SigningKey;
+        let vk = SigningKey::from_bytes(&[3u8; 32]).verifying_key();
+        let mut t = sealed_trace();
+        // No signature → false (not a panic).
+        assert!(!verify_trace_signature(&t, &vk));
+        // Non-base64 garbage → false.
+        t.signature = Some("!!!not base64!!!".into());
+        assert!(!verify_trace_signature(&t, &vk));
+        // Right base64 but wrong length → false.
+        t.signature = Some(encode_signature(&[0u8; 10]));
+        assert!(!verify_trace_signature(&t, &vk));
     }
 }
