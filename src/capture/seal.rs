@@ -220,6 +220,42 @@ pub fn verify_trace_signature(
     verifying_key.verify(&message, &signature).is_ok()
 }
 
+/// Error sealing (signing) a trace.
+#[derive(Debug, thiserror::Error)]
+pub enum TraceSealError {
+    /// The canonical envelope couldn't be serialized (shouldn't happen
+    /// for a well-formed trace; surfaced for diagnostics).
+    #[error("canonicalize: {0}")]
+    Canonicalize(String),
+    /// The host signer failed to produce the Ed25519 signature.
+    #[error("sign: {0}")]
+    Sign(#[from] ciris_persist::prelude::LocalSignerError),
+}
+
+/// Seal a trace: compute its canonical bytes, Ed25519-sign them with the
+/// host's signing identity, and stamp the signature + `signature_key_id`
+/// onto the trace. The signing half of the client-mode seal flow
+/// (Cut 4). Synchronous — trace signing is Ed25519-only, and
+/// `LocalSigner::sign_ed25519` is a hot-path sync call (the hybrid PQC
+/// pair is the detection-event surface, not traces).
+///
+/// `signer` is the host's [`LocalSigner`] — in cohabitation it wraps the
+/// agent's unified key arriving across the `Engine` boundary, so a trace
+/// lens-core seals here is signed under the same identity (and verifies
+/// under the same key) as one the agent would have signed itself. After
+/// this returns `Ok`, the trace is ready for `receive_and_persist` +
+/// upstream fan-out (the Engine/Edge integration that lands with the
+/// `LensCore::client` surface).
+pub fn sign_trace(
+    signer: &ciris_persist::prelude::LocalSigner,
+    trace: &mut CompleteTrace,
+) -> Result<(), TraceSealError> {
+    let bytes = canonical_bytes(trace).map_err(TraceSealError::Canonicalize)?;
+    let sig = signer.sign_ed25519(&bytes)?;
+    apply_signature(trace, &sig, signer.key_id());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,6 +500,36 @@ mod tests {
         // Wrong key fails too.
         let other = SigningKey::from_bytes(&[1u8; 32]).verifying_key();
         assert!(!verify_trace_signature(&t, &other));
+    }
+
+    #[test]
+    fn sign_trace_with_real_persist_signer_round_trips() {
+        // End-to-end: lens-core's sign_trace using the REAL persist
+        // LocalSigner.sign_ed25519 produces a signature that
+        // verify_trace_signature (= the agent's verify_trace algorithm)
+        // accepts. Proves the Engine-sign glue, not just the algorithm.
+        use ciris_persist::prelude::LocalSigner;
+        use ed25519_dalek::SigningKey;
+
+        let sk = SigningKey::from_bytes(&[42u8; 32]);
+        let vk = sk.verifying_key();
+        // from_parts: in-memory test signer over the same Ed25519 key
+        // (no seed file, no PQC — traces are Ed25519-only).
+        let signer = LocalSigner::from_parts(sk, "host-unified-key".into(), None, None);
+
+        let mut t = sealed_trace();
+        sign_trace(&signer, &mut t).expect("sign");
+
+        assert_eq!(t.signature_key_id.as_deref(), Some("host-unified-key"));
+        assert!(t.signature.is_some());
+        assert!(
+            verify_trace_signature(&t, &vk),
+            "trace signed via persist LocalSigner must verify under the agent's algorithm"
+        );
+        // And tampering still breaks it post-real-sign.
+        let mut tampered = t.clone();
+        tampered.thought_id = "swapped".into();
+        assert!(!verify_trace_signature(&tampered, &vk));
     }
 
     #[test]
