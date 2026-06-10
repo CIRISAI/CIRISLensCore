@@ -30,10 +30,12 @@
 //!   form tracked at #36); the ~10-line `accord_metrics/__init__.py`
 //!   shim; CIRISAgent `tests/adapters/accord_metrics/` parity.
 
+pub mod batch;
 pub mod event;
 pub mod partial;
 pub mod seal;
 
+pub use batch::{build_batch_bytes, BatchBuildError, BatchProvenance};
 pub use event::{ComponentType, ReasoningEventType};
 pub use partial::{
     CaptureOutcome, CompleteTrace, InboundEvent, PartialTraceStore, TraceComponent,
