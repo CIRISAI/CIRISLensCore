@@ -51,12 +51,22 @@ def fixtures(CompleteTrace, TraceComponent):
     nested data, unsorted keys, the full event taxonomy."""
     ts = "2026-04-23T12:00:00+00:00"
 
-    def comp(event_type, component_type, data, ts_=ts, aih="deadbeef"):
+    # The agent injects attempt_index INSIDE component data at capture
+    # (services.py:1698 `component_data["attempt_index"] = attempt_index`),
+    # so it lands in the signed canonical bytes (even 0 — strip_empty keeps
+    # it). lens-core keeps attempt_index as a separate typed field and must
+    # inject it at canonicalization. We build the agent component WITH it in
+    # data here; trace_to_spec pops it back out so the fixture carries a
+    # separate `attempt_index` + clean `data` — which is exactly what forces
+    # lens-core's injection to be exercised.
+    def comp(event_type, component_type, data, ts_=ts, aih="deadbeef", attempt_index=0):
+        agent_data = dict(data)
+        agent_data["attempt_index"] = attempt_index  # services.py:1698
         return TraceComponent(
             component_type=component_type,
             event_type=event_type,
             timestamp=ts_,
-            data=data,
+            data=agent_data,
             agent_id_hash=aih,
         )
 
@@ -77,12 +87,16 @@ def fixtures(CompleteTrace, TraceComponent):
     out = []
 
     # 1. floats + empty-field stripping (None/[]) inside component data.
+    #    attempt_index 0 (THOUGHT_START single-emit) + a non-zero retry on
+    #    a multi-emit event — both must land in the signed bytes.
     out.append(trace(
         "float_and_empty_fields",
         components=[
             comp("THOUGHT_START", "observation",
-                 {"k_eff": 0.9, "phase": "healthy", "empty_field": None, "empty_list": []}),
-            comp("ACTION_RESULT", "action", {"action": "speak", "rationale": "test"}),
+                 {"k_eff": 0.9, "phase": "healthy", "empty_field": None, "empty_list": []},
+                 attempt_index=0),
+            comp("ACTION_RESULT", "action", {"action": "speak", "rationale": "test"},
+                 attempt_index=3),
         ],
     ))
 
@@ -117,7 +131,7 @@ def fixtures(CompleteTrace, TraceComponent):
         "unicode_nested_numeric",
         components=[comp("CONSCIENCE_RESULT", "conscience",
                          {"note": "café ☕ — überwacht", "nested": {"b": [1, 2, 3], "f": -1.5e10},
-                          "big": 9007199254740993})],
+                          "big": 9007199254740993}, attempt_index=2)],
     ))
 
     # 6. the full event taxonomy (one component per known type) — locks
@@ -148,6 +162,23 @@ def fixtures(CompleteTrace, TraceComponent):
     return out
 
 
+def _comp_spec(c):
+    # Pop attempt_index back out of the agent's data dict so the fixture
+    # mirrors lens-core's shape: a separate typed `attempt_index` + clean
+    # `data`. lens-core re-injects it at canonicalization to reach the
+    # agent's signed bytes.
+    data = dict(c.data)
+    attempt_index = data.pop("attempt_index", 0)
+    return {
+        "event_type": c.event_type,
+        "component_type": c.component_type,
+        "timestamp": c.timestamp,
+        "agent_id_hash": c.agent_id_hash,
+        "attempt_index": attempt_index,
+        "data": data,
+    }
+
+
 def trace_to_spec(name, t):
     return {
         "name": name,
@@ -157,11 +188,7 @@ def trace_to_spec(name, t):
             "completed_at": t.completed_at, "trace_level": t.trace_level,
             "trace_schema_version": t.trace_schema_version,
             "deployment_profile": t.deployment_profile,
-            "components": [
-                {"event_type": c.event_type, "component_type": c.component_type,
-                 "timestamp": c.timestamp, "agent_id_hash": c.agent_id_hash, "data": c.data}
-                for c in t.components
-            ],
+            "components": [_comp_spec(c) for c in t.components],
         },
     }
 

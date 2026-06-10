@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use super::event::{ComponentType, ReasoningEventType};
 
@@ -60,15 +60,43 @@ pub struct TraceComponent {
 }
 
 impl TraceComponent {
+    /// The component's `data` with `attempt_index` injected as a key —
+    /// the agent's wire + signed-canonical shape
+    /// (CIRISAgent `services.py:1698`
+    /// `component_data["attempt_index"] = attempt_index`, set at capture).
+    ///
+    /// `attempt_index` is lens-core's authoritative *typed field*; on the
+    /// wire and in the signed canonical bytes it lives **inside** `data`
+    /// (even `0`, which `strip_empty` keeps — it is informative: confirms
+    /// first occurrence). This is the single injection point shared by
+    /// [`to_json`](Self::to_json) (wire) and
+    /// [`build_canonical_envelope`](super::seal::build_canonical_envelope)
+    /// (signed bytes) so the two can never drift.
+    pub fn data_with_attempt_index(&self) -> Value {
+        let mut map = match &self.data {
+            Value::Object(m) => m.clone(),
+            // The agent's component data is always a dict; a null/absent
+            // payload becomes the minimal `{"attempt_index": N}` (matching
+            // the agent, whose `_extract_component_data` always returns a
+            // dict it then injects into). Non-object scalars are
+            // out-of-contract and collapse to the same minimal dict.
+            _ => Map::new(),
+        };
+        map.insert("attempt_index".into(), json!(self.attempt_index));
+        Value::Object(map)
+    }
+
     /// Wire JSON for this component — snake_case `component_type` +
-    /// bare `event_type`, matching the legacy `to_dict` shape.
+    /// bare `event_type`, matching the agent's `to_dict` shape.
+    /// `attempt_index` is carried **inside** `data` (not a sibling key),
+    /// per the agent (`services.py:1698`); see
+    /// [`data_with_attempt_index`](Self::data_with_attempt_index).
     pub fn to_json(&self) -> Value {
         json!({
             "component_type": self.component_type.as_wire_str(),
             "event_type": self.event_type.as_wire_str(),
             "timestamp": self.timestamp,
-            "attempt_index": self.attempt_index,
-            "data": self.data,
+            "data": self.data_with_attempt_index(),
             "agent_id_hash": self.agent_id_hash,
         })
     }

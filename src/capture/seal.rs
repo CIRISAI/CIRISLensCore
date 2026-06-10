@@ -119,7 +119,11 @@ pub fn build_canonical_envelope(trace: &CompleteTrace) -> Value {
             strip_empty(json!({
                 "agent_id_hash": agent_id_hash,
                 "component_type": c.component_type.as_wire_str(),
-                "data": c.data,
+                // attempt_index is injected INSIDE data (the agent's
+                // signed-canonical shape, services.py:1698) — never a
+                // sibling key. Shared single injection point with the wire
+                // path so the two can't drift.
+                "data": c.data_with_attempt_index(),
                 "event_type": c.event_type.as_wire_str(),
                 "timestamp": c.timestamp,
             }))
@@ -375,7 +379,9 @@ mod tests {
         assert_eq!(comp0["event_type"], "THOUGHT_START");
         assert_eq!(comp0["agent_id_hash"], "agenthash");
         assert_eq!(comp0["timestamp"], "2026-06-08T00:00:00Z");
-        assert_eq!(comp0["data"], json!({"thought": "hi"}));
+        // attempt_index is injected INSIDE data (agent services.py:1698),
+        // not a sibling key. The `component()` helper builds attempt_index 0.
+        assert_eq!(comp0["data"], json!({"thought": "hi", "attempt_index": 0}));
     }
 
     #[test]
@@ -430,10 +436,12 @@ mod tests {
         let bytes = canonical_bytes(&t).expect("canonicalize");
         let got = String::from_utf8(bytes).unwrap();
         // Sorted keys, compact separators. components sorted-keys-per-object.
+        // attempt_index 0 is injected inside `data` (agent services.py:1698)
+        // — sorts before "k". This is the agent's signed-canonical shape.
         let expected = concat!(
             r#"{"agent_id_hash":"ah","completed_at":"2026-06-08T00:00:01Z","#,
             r#""components":[{"agent_id_hash":"ah","component_type":"action","#,
-            r#""data":{"k":"v"},"event_type":"ACTION_RESULT","#,
+            r#""data":{"attempt_index":0,"k":"v"},"event_type":"ACTION_RESULT","#,
             r#""timestamp":"2026-06-08T00:00:01Z"}],"started_at":"2026-06-08T00:00:00Z","#,
             r#""task_id":null,"thought_id":"th","trace_id":"tr","#,
             r#""trace_level":"GENERIC","trace_schema_version":"2.7.9"}"#
@@ -591,6 +599,7 @@ mod tests {
         component_type: String,
         timestamp: String,
         agent_id_hash: String,
+        attempt_index: u32,
         data: Value,
     }
 
@@ -617,7 +626,7 @@ mod tests {
                     component_type: derived,
                     event_type,
                     timestamp: c.timestamp,
-                    attempt_index: 0,
+                    attempt_index: c.attempt_index,
                     data: c.data,
                     agent_id_hash: c.agent_id_hash,
                 }
