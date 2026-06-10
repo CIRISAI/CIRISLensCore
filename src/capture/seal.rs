@@ -546,4 +546,126 @@ mod tests {
         t.signature = Some(encode_signature(&[0u8; 10]));
         assert!(!verify_trace_signature(&t, &vk));
     }
+
+    // ── Cross-implementation parity harness (CIRISLensCore#11 Cut 5) ─────
+    //
+    // The hand-written `canonical_bytes_are_byte_exact_*` test above pins
+    // one string we wrote by hand. This harness instead pins lens-core's
+    // canonical bytes against the AGENT's REAL `_build_canonical_message`
+    // output, captured on a battery of fixtures by
+    // `tests/parity/generate_canonical_fixtures.py` and committed as
+    // `tests/parity/canonical_fixtures.json`. It catches divergences a
+    // hand-written string can't reach — `ensure_ascii` unicode escaping
+    // (`café` → `café`), Python float repr (`-1.5e10` →
+    // `-15000000000.0`), 0/false retention, empty-field stripping, and the
+    // full event-type → component-type taxonomy — across the
+    // serde_json/PythonJsonDumpsCanonicalizer boundary. Hermetic: CI runs
+    // it against the committed JSON with NO agent checkout. Regenerate the
+    // fixtures when the agent's §8 format moves; a fixtures diff IS the
+    // wire-format change.
+
+    #[derive(serde::Deserialize)]
+    struct ParityFixture {
+        name: String,
+        trace: TraceSpec,
+        expected_canonical: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct TraceSpec {
+        trace_id: String,
+        thought_id: String,
+        task_id: Option<String>,
+        agent_id_hash: String,
+        started_at: String,
+        completed_at: Option<String>,
+        trace_level: Option<String>,
+        trace_schema_version: String,
+        deployment_profile: Option<Value>,
+        components: Vec<CompSpec>,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct CompSpec {
+        event_type: String,
+        component_type: String,
+        timestamp: String,
+        agent_id_hash: String,
+        data: Value,
+    }
+
+    fn trace_from_spec(spec: TraceSpec) -> CompleteTrace {
+        let components = spec
+            .components
+            .into_iter()
+            .map(|c| {
+                let event_type = ReasoningEventType::parse(&c.event_type)
+                    .unwrap_or_else(|| panic!("fixture event_type {:?} must parse", c.event_type));
+                // lens-core derives component_type from event_type; assert the
+                // agent's explicit component_type agrees — this locks the
+                // taxonomy mapping across both implementations.
+                let derived = event_type.component_type();
+                assert_eq!(
+                    derived.as_wire_str(),
+                    c.component_type,
+                    "taxonomy drift: {} maps to {} in lens-core but the agent fixture says {}",
+                    c.event_type,
+                    derived.as_wire_str(),
+                    c.component_type,
+                );
+                TraceComponent {
+                    component_type: derived,
+                    event_type,
+                    timestamp: c.timestamp,
+                    attempt_index: 0,
+                    data: c.data,
+                    agent_id_hash: c.agent_id_hash,
+                }
+            })
+            .collect();
+        CompleteTrace {
+            trace_id: spec.trace_id,
+            thought_id: spec.thought_id,
+            task_id: spec.task_id,
+            agent_id_hash: spec.agent_id_hash,
+            started_at: spec.started_at,
+            completed_at: spec.completed_at,
+            components,
+            signature: None,
+            signature_key_id: None,
+            trace_level: spec.trace_level,
+            trace_schema_version: spec.trace_schema_version,
+            deployment_profile: spec.deployment_profile,
+        }
+    }
+
+    #[test]
+    fn canonical_bytes_match_agent_fixtures() {
+        // Committed fixtures = the agent's real signed bytes. Embedded at
+        // compile time so the test is hermetic (no agent checkout in CI).
+        const FIXTURES: &str =
+            include_str!("../../tests/parity/canonical_fixtures.json");
+        let fixtures: Vec<ParityFixture> =
+            serde_json::from_str(FIXTURES).expect("parity fixtures must deserialize");
+        assert!(
+            fixtures.len() >= 7,
+            "expected the full fixture battery, got {}",
+            fixtures.len()
+        );
+
+        for fixture in fixtures {
+            let name = fixture.name.clone();
+            let expected = fixture.expected_canonical.clone();
+            let trace = trace_from_spec(fixture.trace);
+            let bytes = canonical_bytes(&trace)
+                .unwrap_or_else(|e| panic!("[{name}] canonicalize failed: {e}"));
+            let got = String::from_utf8(bytes)
+                .unwrap_or_else(|e| panic!("[{name}] canonical bytes not UTF-8: {e}"));
+            assert_eq!(
+                got, expected,
+                "[{name}] lens-core canonical bytes diverge from the agent's signed bytes\n  \
+                 lens: {got}\n  agent: {expected}"
+            );
+        }
+    }
 }
