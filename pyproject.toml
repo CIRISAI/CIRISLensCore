@@ -61,7 +61,7 @@ classifiers = [
 # Lens-core's CI installs `libtss2-dev` on its Linux jobs (mirrors
 # CIRISEdge#12). Re-pin in lockstep with edge + NodeCore + agent.
 dependencies = [
-    "ciris-persist==4.10.0",
+    "ciris-persist==4.13.0",
 ]
 dynamic = ["version"]
 
