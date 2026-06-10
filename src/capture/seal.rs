@@ -4,8 +4,10 @@
 //! # The signature-critical contract
 //!
 //! When `ACTION_RESULT` seals a trace, lens-core canonicalizes it,
-//! signs the canonical bytes (Ed25519 + ML-DSA-65 hybrid via the host
-//! `Engine`), and persists it. The **canonical bytes must be
+//! **Ed25519**-signs the canonical bytes (via the host `Engine`'s
+//! signing identity), and persists it. (Trace signing is Ed25519-only —
+//! the hybrid Ed25519+ML-DSA-65 pair is the detection-event /
+//! attestation surface, not traces.) The **canonical bytes must be
 //! byte-identical** to what every federation verifier recomputes, or
 //! the signature fails to verify. This module owns the canonical-
 //! envelope *structure*; the byte serialization is delegated to
@@ -36,12 +38,15 @@
 //! `_strip_empty`). The per-component `agent_id_hash` is denormalized
 //! from the trace envelope (2.7.9 / CIRISAgent#712 item 1).
 //!
-//! # Not in this cut
+//! # This module
 //!
-//! The async sign + persist wrapper (`engine.local_sign` /
-//! `local_pqc_sign` → `receive_and_persist`) is the Engine-coupled
-//! follow-on; it reuses `crate::signing::event`'s hybrid machinery.
-//! This module is the pure, signature-critical canonical-bytes core.
+//! The pure, signature-critical core: [`build_canonical_envelope`] /
+//! [`canonical_bytes`] (the signed bytes) + [`apply_signature`] /
+//! [`verify_trace_signature`] (Ed25519 stamp + the federation-verifier
+//! algorithm). No Engine, no I/O — fully unit-tested incl. a sign→verify
+//! round-trip. The thin async glue (`engine.local_sign(canonical_bytes)`
+//! → `apply_signature` → `receive_and_persist`) lands with the Engine
+//! integration (Cut 4).
 
 use serde_json::{json, Map, Value};
 
