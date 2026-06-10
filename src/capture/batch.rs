@@ -160,10 +160,7 @@ pub fn build_batch_bytes(
 
     let mut envelope = Map::new();
     envelope.insert("events".into(), Value::Array(events));
-    envelope.insert(
-        "batch_timestamp".into(),
-        json!(provenance.batch_timestamp),
-    );
+    envelope.insert("batch_timestamp".into(), json!(provenance.batch_timestamp));
     envelope.insert(
         "consent_timestamp".into(),
         json!(provenance.consent_timestamp),
@@ -207,8 +204,9 @@ mod tests {
     }
 
     /// A sealed 2.7.9 trace with the required `deployment_profile` block
-    /// + lowercase wire `trace_level` (so persist's typed `TraceLevel` /
-    /// `DeploymentProfile` deserialize). Unsigned until the test signs it.
+    /// and a lowercase wire `trace_level` (so persist's typed
+    /// `TraceLevel` / `DeploymentProfile` deserialize). Unsigned until the
+    /// test signs it.
     fn sealed_279_trace() -> CompleteTrace {
         CompleteTrace {
             trace_id: "trace-1".into(),
@@ -319,8 +317,8 @@ mod tests {
         // persist's real typed deserializer + all its gates (schema
         // version supported, events non-empty, data depth, 2.7.9
         // deployment_profile required).
-        let env = BatchEnvelope::from_json(&bytes)
-            .expect("persist must parse the lens-core-built batch");
+        let env =
+            BatchEnvelope::from_json(&bytes).expect("persist must parse the lens-core-built batch");
         assert_eq!(env.events.len(), 1);
 
         let BatchEvent::CompleteTrace { trace: ptrace, .. } = &env.events[0];

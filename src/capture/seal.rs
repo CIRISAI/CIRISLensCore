@@ -652,8 +652,7 @@ mod tests {
     fn canonical_bytes_match_agent_fixtures() {
         // Committed fixtures = the agent's real signed bytes. Embedded at
         // compile time so the test is hermetic (no agent checkout in CI).
-        const FIXTURES: &str =
-            include_str!("../../tests/parity/canonical_fixtures.json");
+        const FIXTURES: &str = include_str!("../../tests/parity/canonical_fixtures.json");
         let fixtures: Vec<ParityFixture> =
             serde_json::from_str(FIXTURES).expect("parity fixtures must deserialize");
         assert!(
