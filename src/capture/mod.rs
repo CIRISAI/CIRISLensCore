@@ -31,11 +31,21 @@
 //!   shim; CIRISAgent `tests/adapters/accord_metrics/` parity.
 
 pub mod batch;
+pub mod client;
+pub mod consent;
 pub mod event;
 pub mod partial;
 pub mod seal;
 
 pub use batch::{build_batch_bytes, BatchBuildError, BatchProvenance};
+pub use client::{
+    sign_trace_via_hardware_signer, CaptureClient, CaptureEventOutcome, ClientError, SealSignError,
+    SealSummary,
+};
+pub use consent::{
+    resolve_consent, resolve_consent_via_engine, resolve_grant, ConsentConfig, ConsentError,
+    ConsentResolution, GrantState, CONSENT_DIMENSION,
+};
 pub use event::{ComponentType, ReasoningEventType};
 pub use partial::{
     CaptureOutcome, CompleteTrace, InboundEvent, PartialTraceStore, TraceComponent,
