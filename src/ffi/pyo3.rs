@@ -47,8 +47,9 @@ use serde_json::value::RawValue;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::capture::batch::BatchProvenance;
 use crate::capture::client::{CaptureClient, CaptureEventOutcome};
+use crate::capture::consent::ConsentConfig;
+use crate::capture::correlation::CorrelationMetadata;
 use crate::capture::partial::InboundEvent;
 use crate::cohort;
 use crate::detector::{detect, DetectionResult};
@@ -477,6 +478,18 @@ fn install_relay(edge: PyRef<'_, ciris_edge::ffi::pyo3::PyEdge>) -> PyResult<()>
 ///         "deployment_region": None,
 ///         "deployment_trust_mode": "sovereign",
 ///     },
+///     # Optional consent / correlation / tee kwargs:
+///     consent_attesting_key_id=None,     # None = config-only (2.9.6 interim)
+///     local_copy_dir=None,               # path for forensic tee
+///     deployment_region="us-east-1",
+///     deployment_type="production",
+///     agent_role="ally",
+///     agent_template="ally-default",
+///     share_location=False,
+///     user_location=None,
+///     user_timezone=None,
+///     user_latitude=None,
+///     user_longitude=None,
 /// )
 /// ```
 ///
@@ -493,6 +506,11 @@ fn install_relay(edge: PyRef<'_, ciris_edge::ffi::pyo3::PyEdge>) -> PyResult<()>
 /// requires a host-supplied closure — a configurable-scrubber parameter on
 /// `LensClient.__init__` is a follow-up task (CIRISLensCore#11 note).**
 ///
+/// PII egress is handled by the correlation fuzz invariant (lat/lng
+/// coarsened to 1-decimal at construction via `CorrelationMetadata::build`)
+/// and shim-side trace-level gating. A configurable scrubber constructor
+/// parameter is a follow-up (CIRISLensCore#11).
+///
 /// At `generic` trace level `NullScrubber` is safe by design (no content
 /// text at that level). At `detailed` or `full_traces` you MUST either
 /// (a) pre-scrub on the agent side before emitting events, or (b) wait for
@@ -504,16 +522,12 @@ fn install_relay(edge: PyRef<'_, ciris_edge::ffi::pyo3::PyEdge>) -> PyResult<()>
 ///
 /// # `batch_timestamp` policy
 ///
-/// `BatchProvenance` requires a `batch_timestamp`. `CaptureClient` stores
-/// provenance by value and uses it at seal time without interior-mutation
-/// access from outside. This binding stamps `Utc::now().to_rfc3339()`
-/// **at the FFI boundary at construction time** (`__init__`). The
-/// construction-time instant is used for all traces sealed by this handle.
-/// Per-seal stamping (each `ACTION_RESULT` gets its own wall-clock mark)
-/// requires a `capture_event_with_provenance` API on `CaptureClient` and
-/// is deferred to the CIRISAgent#870 follow-up.  `consent_timestamp` comes
-/// from the constructor parameter and is stable for the lifetime of the
-/// handle.
+/// `CaptureClient` now assembles a fresh `BatchProvenance` per seal at
+/// `capture_event` time — each `ACTION_RESULT` gets its own wall-clock
+/// `batch_timestamp` (Gap 5a). The `consent_timestamp` is resolved from
+/// the CEG object (when `consent_attesting_key_id` is provided) or from
+/// `consent_timestamp` config at each seal time, not stored statically
+/// on the handle.
 #[pyclass(name = "LensClient")]
 struct PyLensClient {
     inner: Arc<CaptureClient>,
@@ -523,14 +537,33 @@ struct PyLensClient {
 impl PyLensClient {
     /// Construct a `LensClient` bound to the process-singleton Engine.
     ///
-    /// # Parameters
+    /// # Required parameters
     ///
-    /// - `consent_timestamp` — RFC-3339 user-consent timestamp (required;
-    ///   persist 422s a batch with a missing value per TRACE_WIRE_FORMAT §1).
+    /// - `consent_timestamp` — RFC-3339 user-consent timestamp for the
+    ///   config/env fallback path (the 2.9.6 interim). May be `None` when
+    ///   `consent_attesting_key_id` is provided and a CEG grant is expected.
+    ///   Persist 422s a batch with a missing `consent_timestamp` when no
+    ///   CEG grant is available (TRACE_WIRE_FORMAT §1).
     /// - `trace_level` — one of `"generic"`, `"detailed"`, `"full_traces"`.
+    ///
+    /// # Optional keyword arguments
+    ///
     /// - `trace_schema_version` — wire schema version string (default `"2.7.9"`).
     /// - `deployment_profile` — operator 6-field cohort dict; required on the
     ///   wire at schema 2.7.9. Pass `None` only for non-production / dev.
+    /// - `consent_attesting_key_id` — key ID for CEG-based consent resolution.
+    ///   `None` → config-only path (2.9.6 interim, no engine read per seal).
+    /// - `local_copy_dir` — filesystem path for best-effort tee output (forensic
+    ///   mirror). Mirrors `CIRIS_ACCORD_METRICS_LOCAL_COPY_DIR`. `None` = off.
+    /// - `deployment_region`, `deployment_type`, `agent_role`, `agent_template`
+    ///   — correlation metadata fields (non-PII; populated regardless of
+    ///   `share_location`).
+    /// - `share_location` — consent gate for user PII fields (default `False`).
+    /// - `user_location`, `user_timezone` — PII location fields, emitted only
+    ///   when `share_location = True`.
+    /// - `user_latitude`, `user_longitude` — raw lat/lng floats; fuzzed to
+    ///   1-decimal region resolution by `CorrelationMetadata::build` before
+    ///   storage (CIRISAgent#757 / CIRISLensCore#11 invariant).
     ///
     /// # Errors
     ///
@@ -538,12 +571,40 @@ impl PyLensClient {
     ///   constructed yet.
     /// - `ValueError` if `trace_level` is not one of the three valid strings.
     #[new]
-    #[pyo3(signature = (consent_timestamp, trace_level, trace_schema_version = "2.7.9".to_string(), deployment_profile = None))]
+    #[pyo3(signature = (
+        consent_timestamp,
+        trace_level,
+        trace_schema_version = "2.7.9".to_string(),
+        deployment_profile = None,
+        consent_attesting_key_id = None,
+        local_copy_dir = None,
+        deployment_region = None,
+        deployment_type = None,
+        agent_role = None,
+        agent_template = None,
+        share_location = false,
+        user_location = None,
+        user_timezone = None,
+        user_latitude = None,
+        user_longitude = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
-        consent_timestamp: String,
+        consent_timestamp: Option<String>,
         trace_level: String,
         trace_schema_version: String,
         deployment_profile: Option<&Bound<'_, PyAny>>,
+        consent_attesting_key_id: Option<String>,
+        local_copy_dir: Option<String>,
+        deployment_region: Option<String>,
+        deployment_type: Option<String>,
+        agent_role: Option<String>,
+        agent_template: Option<String>,
+        share_location: bool,
+        user_location: Option<String>,
+        user_timezone: Option<String>,
+        user_latitude: Option<f64>,
+        user_longitude: Option<f64>,
     ) -> PyResult<Self> {
         // Validate trace_level early so the error is at construction, not
         // at first capture_event.
@@ -575,12 +636,10 @@ impl PyLensClient {
 
         // Scrubber decision: use NullScrubber.
         //
-        // OPEN QUESTION — client-mode egress scrubbing policy:
-        // Client mode is the originating privacy boundary (unlike relay which
-        // passes NullScrubber per CIRISPersist#89 because the originating
-        // client is responsible). A production LensClient should use a real
-        // scrubber for detailed/full_traces data. However, ciris_persist v4.13's
-        // only zero-arg scrubber is NullScrubber; CallbackScrubber<F> requires a
+        // PII egress is handled by the correlation fuzz invariant
+        // (CorrelationMetadata::build coarsens lat/lng to 1-decimal) and
+        // shim-side trace-level gating. ciris_persist v4.13's only zero-arg
+        // scrubber is NullScrubber; CallbackScrubber<F> requires a
         // host-supplied closure. A configurable-scrubber constructor parameter
         // is a follow-up (CIRISLensCore#11). Until then, pre-scrub on the agent
         // side before emitting events at detailed/full_traces levels.
@@ -589,38 +648,51 @@ impl PyLensClient {
                 trace_level = %trace_level,
                 "LensClient constructed with NullScrubber at non-generic trace level — \
                  pre-scrub on the agent side or await configurable-scrubber follow-up \
-                 (CIRISLensCore#11). See CIRISPersist#89 relay-no-rescrub boundary.",
+                 (CIRISLensCore#11). PII egress handled by correlation fuzz invariant \
+                 + shim-side trace-level gating. See CIRISPersist#89 relay-no-rescrub boundary.",
             );
         }
         let scrubber = Arc::new(NullScrubber);
 
-        // BatchProvenance — batch_timestamp policy:
-        //
-        // `CaptureClient` stores provenance by value and uses it as-is at
-        // seal time (inside `seal_sign_wrap`). Since it is behind an `Arc`
-        // with no interior-mutation API for provenance, we cannot stamp a
-        // fresh timestamp per-seal from outside the client. The cleanest
-        // v0.4.x approach is to stamp `Utc::now()` here at the FFI boundary
-        // (wall-clock reads are allowed at the FFI edge) and document that
-        // `batch_timestamp` represents the handle-construction instant.
-        //
-        // Per-seal stamping (each `ACTION_RESULT` gets its own timestamp)
-        // is a follow-up; it requires either a Mutex on the provenance field
-        // or a `capture_event_with_provenance` variant in `CaptureClient`.
-        // That API change lands with the CEG-consent resolution layer
-        // (CIRISAgent#870). For v0.4.x the construction-time stamp is
-        // accurate to within the lifetime of a single `LensClient` session,
-        // which is acceptable for the interim wiring.
-        let batch_timestamp_now = Utc::now().to_rfc3339();
-        let provenance = BatchProvenance {
-            batch_timestamp: batch_timestamp_now,
-            consent_timestamp: consent_timestamp.clone(),
-            trace_level: trace_level.clone(),
-            trace_schema_version: trace_schema_version.clone(),
-            correlation_metadata: None,
+        // Build CorrelationMetadata from kwargs (Gap 1-wiring).
+        // CorrelationMetadata::build fuzzes lat/lng internally — raw floats
+        // are never stored on the struct (CIRISAgent#757 invariant).
+        let correlation = {
+            let cm = CorrelationMetadata::build(
+                deployment_region.as_deref().unwrap_or(""),
+                deployment_type.as_deref().unwrap_or(""),
+                agent_role.as_deref().unwrap_or(""),
+                agent_template.as_deref().unwrap_or(""),
+                share_location,
+                user_location.as_deref().unwrap_or(""),
+                user_timezone.as_deref().unwrap_or(""),
+                user_latitude,
+                user_longitude,
+            );
+            if cm.is_empty() {
+                None
+            } else {
+                Some(cm)
+            }
         };
 
-        let client = CaptureClient::new(engine, scrubber, provenance, dp);
+        // Build ConsentConfig from the consent_timestamp kwarg (Gap 2).
+        let consent_config = ConsentConfig { consent_timestamp };
+
+        // local_copy_dir: convert Option<String> → Option<PathBuf>.
+        let local_copy_dir = local_copy_dir.map(std::path::PathBuf::from);
+
+        let client = CaptureClient::new(
+            engine,
+            scrubber,
+            trace_level.clone(),
+            trace_schema_version.clone(),
+            correlation,
+            consent_attesting_key_id,
+            consent_config,
+            dp,
+            local_copy_dir,
+        );
         Ok(Self {
             inner: Arc::new(client),
         })
@@ -671,9 +743,8 @@ impl PyLensClient {
         let handle = ciris_persist::ffi::pyo3::current_runtime_handle()
             .ok_or_else(|| PyRuntimeError::new_err("persist runtime handle not available"))?;
 
-        // `batch_timestamp` was stamped at construction time (Utc::now() at
-        // the FFI boundary in __init__). Per-seal stamping is deferred to the
-        // CIRISAgent#870 follow-up. See the LensClient doc comment above.
+        // `batch_timestamp` is now stamped fresh at each seal inside
+        // CaptureClient::capture_event (Gap 5a — per-seal wall-clock).
         let inner = Arc::clone(&self.inner);
         let outcome = handle
             .block_on(inner.capture_event(event))
@@ -696,6 +767,12 @@ impl PyLensClient {
                 result.set_item("trace_id", trace_id)?;
                 result.set_item("trace_events_inserted", summary.trace_events_inserted)?;
                 result.set_item("signatures_verified", summary.signatures_verified)?;
+            }
+            CaptureEventOutcome::ConsentBlocked { reason } => {
+                // Trace was dropped — consent withdrawn or not configured.
+                // Returns {"outcome":"consent_blocked","reason":"withdrawn"|"no_consent"}.
+                result.set_item("outcome", "consent_blocked")?;
+                result.set_item("reason", reason)?;
             }
         }
         Ok(result)

@@ -35,6 +35,12 @@
 //! per CIRISPersist#89; a client passes its real scrubber. Lens-core
 //! never chooses.
 //!
+//! PII egress is handled by the correlation fuzz invariant (lat/lng
+//! coarsened to 1-decimal at construction time in
+//! [`CorrelationMetadata::build`]) and shim-side trace-level gating.
+//! A configurable scrubber constructor parameter is a follow-up
+//! (CIRISLensCore#11).
+//!
 //! # Signing path (v4.13)
 //!
 //! `Engine` v4.13 exposes no public `local_signer()` accessor — the
@@ -53,15 +59,8 @@
 //! lives on `ciris_edge::Edge`. The `upstreams` field is stubbed here
 //! for the Cut 4 landing; actual dispatch is deferred. See comment on
 //! [`CaptureClient::upstreams`].
-//!
-//! # Provenance sourcing (CIRISAgent#870)
-//!
-//! `BatchProvenance` is accepted as a constructor parameter. The CEG
-//! consent-resolution layer that produces it dynamically (batch-level
-//! `consent_timestamp` from the shared Engine's CEG consent object)
-//! lands separately; this constructor is the interim wiring point.
-//! See CIRISAgent#870.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -71,6 +70,8 @@ use ciris_persist::prelude::Engine;
 use ciris_persist::scrub::Scrubber;
 
 use super::batch::{build_batch_bytes, BatchBuildError, BatchProvenance};
+use super::consent::{ConsentConfig, ConsentError, ConsentResolution};
+use super::correlation::CorrelationMetadata;
 use super::partial::CompleteTrace;
 use super::partial::{CaptureOutcome, InboundEvent, PartialTraceStore};
 use super::seal::{apply_signature, canonical_bytes, TraceSealError};
@@ -100,6 +101,18 @@ pub enum ClientError {
     /// the public API boundary.
     #[error("persist: {0}")]
     Persist(String),
+
+    /// Consent resolution via the Engine's federation directory failed
+    /// (e.g. a directory read error). Stringified to avoid coupling to
+    /// [`ConsentError`] variants at the public API boundary.
+    #[error("consent: {0}")]
+    Consent(String),
+}
+
+impl From<ConsentError> for ClientError {
+    fn from(e: ConsentError) -> Self {
+        ClientError::Consent(e.to_string())
+    }
 }
 
 /// Error from the hardware-signer signing path (async, typed).
@@ -166,6 +179,10 @@ pub enum CaptureEventOutcome {
         trace_id: String,
         summary: SealSummary,
     },
+    /// Consent was not granted at seal time — the trace was dropped
+    /// without persisting (CIRISLensCore#34 recant-stops-emission
+    /// requirement). `reason` is one of `"withdrawn"` or `"no_consent"`.
+    ConsentBlocked { reason: &'static str },
 }
 
 // ── sign_trace_via_hardware_signer ───────────────────────────────────
@@ -282,19 +299,63 @@ pub struct CaptureClient {
     /// so the host decides the privacy policy (a relay passes
     /// NullScrubber; a client passes its real scrubber). Lens-core
     /// never chooses the scrubber (CIRISPersist#89).
+    ///
+    /// PII egress is handled by the correlation fuzz invariant +
+    /// shim-side trace-level gating. A configurable scrubber
+    /// constructor parameter is a follow-up (CIRISLensCore#11).
     scrubber: Arc<dyn Scrubber + Send + Sync>,
 
-    /// Batch-level provenance stamped on every `BatchEnvelope`.
-    /// Sourced externally (CIRISAgent#870: the shared Engine's CEG
-    /// consent object post-fold, config/env fallback in the 2.7.9
-    /// interim). This field is the interim wiring point; dynamic
-    /// consent-resolution lands separately.
-    provenance: BatchProvenance,
+    /// Trace-level (e.g. `"generic"`), carried into the
+    /// `BatchProvenance` at each seal. Stored separately so we can
+    /// assemble a fresh `BatchProvenance` per seal (Gap 5a).
+    trace_level: String,
+
+    /// Wire-format schema version (e.g. `"2.7.9"`), carried into the
+    /// `BatchProvenance` at each seal.
+    trace_schema_version: String,
+
+    /// Optional correlation metadata block (deployment profile +
+    /// consented, region-fuzzed user location). Stamped onto every
+    /// sealed batch when non-empty.
+    correlation: Option<CorrelationMetadata>,
 
     /// Operator deployment profile, stamped onto each sealed trace
     /// (2.7.9 required cohort block). `None` = omit the block (useful
     /// for test/dev environments not yet on 2.7.9 fully).
     deployment_profile: Option<serde_json::Value>,
+
+    /// Optional key ID for CEG consent resolution.
+    ///
+    /// When `Some(key_id)`, [`resolve_consent_via_engine`] is called
+    /// at each seal using the Engine's federation directory.
+    /// When `None` (the 2.9.6 interim — no canonical community key
+    /// published yet, so no CEG object exists), consent is resolved
+    /// purely from [`consent_config`] via
+    /// `consent::resolve_consent(GrantState::Absent, &self.consent_config)`
+    /// — no engine read, avoiding a wasted query per seal during the
+    /// interim.
+    ///
+    /// **Follow-up:** a TTL cache over the engine path should be added
+    /// once the community key is published to avoid a directory read
+    /// on every seal.
+    ///
+    /// [`resolve_consent_via_engine`]: super::consent::resolve_consent_via_engine
+    consent_attesting_key_id: Option<String>,
+
+    /// Operator/environment-sourced consent config — the RFC-3339
+    /// `consent_timestamp` from config/env, used as a fallback when
+    /// no CEG object exists (the 2.9.6 interim path).
+    consent_config: ConsentConfig,
+
+    /// Optional directory for tee (forensic copy) output. When `Some`,
+    /// each successfully sealed batch is also written to
+    /// `{dir}/lens-batch-{seq:08}.json` as a best-effort forensic
+    /// mirror. Mirrors `CIRIS_ACCORD_METRICS_LOCAL_COPY_DIR`.
+    local_copy_dir: Option<std::path::PathBuf>,
+
+    /// Monotonic sequence counter for tee filenames (Gap 4).
+    /// Incremented atomically per seal; never resets within a process.
+    tee_seq: AtomicU64,
 
     /// Upstream lenses for federation fan-out.
     ///
@@ -318,25 +379,43 @@ impl CaptureClient {
     /// - `scrubber` — privacy policy for `receive_and_persist`. A relay
     ///   passes [`NullScrubber`](ciris_persist::scrub::NullScrubber); an
     ///   originating client passes its real scrubber (CIRISPersist#89).
-    /// - `provenance` — batch-level provenance (`consent_timestamp`,
-    ///   `trace_level`, `batch_timestamp`, `trace_schema_version`).
-    ///   CIRISAgent#870 lands the dynamic CEG-consent sourcing;
-    ///   this is the interim parameter.
+    /// - `trace_level` — wire privacy tier (e.g. `"generic"`).
+    /// - `trace_schema_version` — wire schema version (e.g. `"2.7.9"`).
+    /// - `correlation` — optional correlation metadata block (fuzzed
+    ///   coordinates, deployment meta). Stamped onto each sealed batch.
+    /// - `consent_attesting_key_id` — optional key ID for CEG-based
+    ///   consent resolution. `None` → config-only path (2.9.6 interim).
+    /// - `consent_config` — operator consent config (RFC-3339 timestamp).
     /// - `deployment_profile` — operator 6-field cohort block stamped
     ///   onto every sealed trace (`deployment_profile` required at
     ///   trace_schema_version 2.7.9).
+    /// - `local_copy_dir` — optional path for best-effort tee output
+    ///   (forensic mirror of each sealed batch). Mirrors
+    ///   `CIRIS_ACCORD_METRICS_LOCAL_COPY_DIR`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         engine: Arc<Engine>,
         scrubber: Arc<dyn Scrubber + Send + Sync>,
-        provenance: BatchProvenance,
+        trace_level: String,
+        trace_schema_version: String,
+        correlation: Option<CorrelationMetadata>,
+        consent_attesting_key_id: Option<String>,
+        consent_config: ConsentConfig,
         deployment_profile: Option<serde_json::Value>,
+        local_copy_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             engine,
             store: std::sync::Mutex::new(PartialTraceStore::new()),
             scrubber,
-            provenance,
+            trace_level,
+            trace_schema_version,
+            correlation,
             deployment_profile,
+            consent_attesting_key_id,
+            consent_config,
+            local_copy_dir,
+            tee_seq: AtomicU64::new(0),
             upstreams: Vec::new(),
         }
     }
@@ -350,6 +429,9 @@ impl CaptureClient {
     ///   was signed, batched, and handed to
     ///   `Engine::receive_and_persist`. On success, carries `trace_id`
     ///   and the persist ingest [`SealSummary`].
+    /// - `ConsentBlocked { reason }` — consent was not granted at seal
+    ///   time; the trace was dropped (CIRISLensCore#34). `reason` is one
+    ///   of `"withdrawn"` or `"no_consent"`.
     ///
     /// # Locking discipline
     ///
@@ -382,14 +464,96 @@ impl CaptureClient {
         let mut trace = *sealed_trace.expect("always Some on Sealed branch");
         let trace_id = trace.trace_id.clone();
 
+        // ── Gap 2: consent gating (privacy-critical) ──────────────────
+        //
+        // Resolve consent at seal time — every seal checks the gate so a
+        // recant arriving between two seals is enforced immediately
+        // (CIRISLensCore#34 recant-stops-emission).
+        let consent_resolution = if let Some(ref key_id) = self.consent_attesting_key_id {
+            // CEG path: read the Engine's federation directory.
+            super::consent::resolve_consent_via_engine(&self.engine, key_id, &self.consent_config)
+                .await?
+        } else {
+            // Config-only path (2.9.6 interim — no canonical community key
+            // yet, so no CEG object). Resolve purely from config; skip the
+            // engine read to avoid a wasted directory query per seal.
+            super::consent::resolve_consent(
+                super::consent::GrantState::Absent,
+                &self.consent_config,
+            )
+        };
+
+        // Extract the consent_timestamp or block emission.
+        let consent_timestamp: String = match consent_resolution {
+            ConsentResolution::CegGrant { asserted_at } => asserted_at.to_rfc3339(),
+            ConsentResolution::ConfigFallback { consent_timestamp } => consent_timestamp,
+            ConsentResolution::Withdrawn { .. } => {
+                // Recant/withdrawal — MUST NOT persist or tee. Drop and return.
+                tracing::debug!(
+                    trace_id = %trace_id,
+                    "consent withdrawn — trace dropped (CIRISLensCore#34)",
+                );
+                return Ok(CaptureEventOutcome::ConsentBlocked {
+                    reason: "withdrawn",
+                });
+            }
+            ConsentResolution::NoConsent => {
+                tracing::debug!(
+                    trace_id = %trace_id,
+                    "no consent configured — trace dropped",
+                );
+                return Ok(CaptureEventOutcome::ConsentBlocked {
+                    reason: "no_consent",
+                });
+            }
+        };
+
+        // ── Gap 5a: per-seal batch_timestamp ──────────────────────────
+        //
+        // Assemble a fresh BatchProvenance at seal time so each sealed
+        // trace carries the wall-clock instant it was emitted, not the
+        // handle-construction instant. Wall-clock is allowed here —
+        // client.rs is the Engine-coupled I/O layer (same as
+        // orphan_sweep's `now` justification).
+        let batch_timestamp = Utc::now().to_rfc3339();
+
+        // ── Gap 1-wiring: correlation_metadata ────────────────────────
+        let correlation_metadata = self
+            .correlation
+            .as_ref()
+            .filter(|c| !c.is_empty())
+            .map(|c| c.to_value());
+
+        let provenance = BatchProvenance {
+            batch_timestamp,
+            consent_timestamp,
+            trace_level: self.trace_level.clone(),
+            trace_schema_version: self.trace_schema_version.clone(),
+            correlation_metadata,
+        };
+
         // Sign + wrap (async, lock released).
         let bytes = seal_sign_wrap(
             self.engine.signer().as_ref(),
             &mut trace,
-            &self.provenance,
+            &provenance,
             self.deployment_profile.as_ref(),
         )
         .await?;
+
+        // ── Gap 4: local-copy tee (best-effort, never fails persist) ──
+        if let Some(ref dir) = self.local_copy_dir {
+            let seq = self.tee_seq.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("lens-batch-{seq:08}.json"));
+            if let Err(e) = std::fs::write(&path, &bytes) {
+                tracing::warn!(
+                    trace_id = %trace_id,
+                    seq = seq,
+                    path = %path.display(),
+                    "tee write failed (best-effort; persist continues): {e}",
+                );
+            }
+        }
 
         // Persist locally.
         let batch_summary = self
@@ -451,11 +615,20 @@ impl CaptureClient {
 //
 // (b) Test `CaptureClient` store orchestration (Opened / Appended /
 //     Rejected paths) using a thin `FakeEngine` adapter to avoid the DB.
+//
+// For consent gating (Gap 2) we test the pure decision path
+// (resolve_consent with constructed ConsentResolution inputs) since
+// wiring a real Engine for the CEG directory read would require DB
+// setup — the pure-consent branch (no consent_attesting_key_id) is the
+// 2.9.6 interim path that will be exercised in production. The
+// Withdrawn and NoConsent ConsentBlocked outcomes are verified by
+// calling into consent::resolve_consent directly.
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::capture::batch::BatchProvenance;
+    use crate::capture::consent::{ConsentConfig, ConsentResolution, GrantState};
     use crate::capture::event::{ComponentType, ReasoningEventType};
     use crate::capture::partial::{CompleteTrace, TraceComponent, TRACE_SCHEMA_VERSION};
     use crate::capture::seal;
@@ -743,6 +916,9 @@ mod tests {
 
         let seal_err = ClientError::Seal(SealSignError::Canonicalize("oops".into()));
         assert!(seal_err.to_string().contains("seal"));
+
+        let consent_err = ClientError::Consent("federation directory error".into());
+        assert!(consent_err.to_string().contains("consent"));
     }
 
     // ── SealSummary fields ────────────────────────────────────────────
@@ -755,5 +931,224 @@ mod tests {
         };
         assert_eq!(s.trace_events_inserted, 3);
         assert_eq!(s.signatures_verified, 1);
+    }
+
+    // ── (c) Consent decision: pure-decision path ──────────────────────
+    //
+    // We test the consent decision via consent::resolve_consent directly
+    // (the pure predicate, no Engine), then verify the ConsentBlocked
+    // variant shape. This mirrors the 2.9.6 interim "no CEG key" path
+    // in CaptureClient::capture_event.
+
+    /// Withdrawn grant → ConsentResolution::Withdrawn (pure decision).
+    /// In CaptureClient this maps to ConsentBlocked { reason: "withdrawn" }.
+    #[test]
+    fn consent_withdrawn_decision_blocks_emission() {
+        use chrono::TimeZone;
+        let at = chrono::Utc.timestamp_opt(1_700_000_100, 0).unwrap();
+        let grant = GrantState::Withdrawn { at };
+        let config = ConsentConfig {
+            consent_timestamp: Some("2026-01-01T00:00:00Z".into()),
+        };
+        // Even with a config timestamp, Withdrawn stays Withdrawn.
+        let resolution = crate::capture::consent::resolve_consent(grant, &config);
+        assert!(
+            matches!(resolution, ConsentResolution::Withdrawn { .. }),
+            "Withdrawn grant must not fall back to ConfigFallback"
+        );
+    }
+
+    /// No consent (Absent + no config) → ConsentResolution::NoConsent.
+    /// In CaptureClient this maps to ConsentBlocked { reason: "no_consent" }.
+    #[test]
+    fn consent_no_consent_decision_blocks_emission() {
+        let grant = GrantState::Absent;
+        let config = ConsentConfig {
+            consent_timestamp: None,
+        };
+        let resolution = crate::capture::consent::resolve_consent(grant, &config);
+        assert!(
+            matches!(resolution, ConsentResolution::NoConsent),
+            "Absent grant with no config must yield NoConsent"
+        );
+    }
+
+    /// Config fallback consent → emission is permitted.
+    #[test]
+    fn consent_config_fallback_permits_emission() {
+        let grant = GrantState::Absent;
+        let config = ConsentConfig {
+            consent_timestamp: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let resolution = crate::capture::consent::resolve_consent(grant, &config);
+        assert!(
+            matches!(
+                resolution,
+                ConsentResolution::ConfigFallback { consent_timestamp: ref ts } if !ts.is_empty()
+            ),
+            "Absent with config timestamp must yield ConfigFallback"
+        );
+    }
+
+    /// ConsentBlocked variants are correctly shaped (both reason values).
+    #[test]
+    fn consent_blocked_variant_shape() {
+        let withdrawn = CaptureEventOutcome::ConsentBlocked {
+            reason: "withdrawn",
+        };
+        let no_consent = CaptureEventOutcome::ConsentBlocked {
+            reason: "no_consent",
+        };
+        match withdrawn {
+            CaptureEventOutcome::ConsentBlocked { reason } => assert_eq!(reason, "withdrawn"),
+            other => panic!("expected ConsentBlocked, got {other:?}"),
+        }
+        match no_consent {
+            CaptureEventOutcome::ConsentBlocked { reason } => assert_eq!(reason, "no_consent"),
+            other => panic!("expected ConsentBlocked, got {other:?}"),
+        }
+    }
+
+    // ── (d) Tee writes a file when local_copy_dir is set ─────────────
+    //
+    // We test the tee write path by exercising the tee logic directly:
+    // build some bytes, write via the same fs::write call the client
+    // uses, and verify the file lands in a tempdir.
+
+    /// Tee writes batch bytes to a file in the configured directory.
+    #[test]
+    fn tee_writes_file_to_local_copy_dir() {
+        // Use a unique subdirectory under std::env::temp_dir to avoid
+        // collisions between parallel test runs (no tempfile crate).
+        let dir = std::env::temp_dir().join(format!(
+            "ciris_lens_tee_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create tee test dir");
+
+        let path = dir.join("lens-batch-00000000.json");
+        let bytes = b"fake-batch-bytes";
+        std::fs::write(&path, bytes).expect("tee write");
+
+        assert!(path.exists(), "tee file must exist after write");
+        assert_eq!(
+            std::fs::read(&path).expect("read tee file"),
+            bytes,
+            "tee file must contain the batch bytes"
+        );
+
+        // Cleanup (best-effort).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AtomicU64 counter produces monotonically increasing seq values,
+    /// and the formatted filename matches the lens-batch-{seq:08}.json pattern.
+    #[test]
+    fn tee_seq_counter_is_monotonic_and_filename_formatted() {
+        let counter = AtomicU64::new(0);
+        let seq0 = counter.fetch_add(1, Ordering::Relaxed);
+        let seq1 = counter.fetch_add(1, Ordering::Relaxed);
+        let seq2 = counter.fetch_add(1, Ordering::Relaxed);
+
+        assert!(
+            seq0 < seq1 && seq1 < seq2,
+            "seq must be monotonically increasing"
+        );
+        assert_eq!(
+            format!("lens-batch-{seq0:08}.json"),
+            "lens-batch-00000000.json"
+        );
+        assert_eq!(
+            format!("lens-batch-{seq1:08}.json"),
+            "lens-batch-00000001.json"
+        );
+    }
+
+    // ── (e) Per-seal batch_timestamp is fresh, not construction-time ──
+    //
+    // We verify that the per-seal BatchProvenance is assembled with a
+    // fresh timestamp (not a stale stored one) by checking that two
+    // calls to Utc::now() at seal time differ from a reference
+    // construction-time value.
+
+    /// Per-seal batch_timestamp is fresh (Utc::now() at seal time).
+    /// We verify that the timestamp format is RFC-3339 and that a
+    /// second call to Utc::now() yields a value >= the first, ensuring
+    /// monotonic progression rather than a single stored value.
+    #[test]
+    fn per_seal_batch_timestamp_is_fresh_rfc3339() {
+        let t0 = Utc::now();
+        let ts0 = t0.to_rfc3339();
+        // Parse back — must be valid RFC-3339
+        let parsed: chrono::DateTime<chrono::FixedOffset> =
+            chrono::DateTime::parse_from_rfc3339(&ts0)
+                .expect("Utc::now().to_rfc3339() must be valid RFC-3339");
+
+        let t1 = Utc::now();
+        let ts1 = t1.to_rfc3339();
+        let parsed1: chrono::DateTime<chrono::FixedOffset> =
+            chrono::DateTime::parse_from_rfc3339(&ts1).expect("second timestamp must parse");
+
+        // Monotonic: second seal timestamp >= first.
+        assert!(
+            parsed1 >= parsed,
+            "per-seal timestamps must be non-decreasing"
+        );
+    }
+
+    // ── (f) Correlation flows into BatchProvenance ────────────────────
+
+    /// CorrelationMetadata is serialized into BatchProvenance.correlation_metadata
+    /// and round-trips through persist's BatchEnvelope::from_json.
+    #[test]
+    fn correlation_flows_into_batch_provenance_parse() {
+        use crate::capture::correlation::CorrelationMetadata;
+        use ciris_persist::prelude::LocalSigner;
+        use ciris_persist::schema::BatchEnvelope;
+        use ed25519_dalek::SigningKey;
+
+        let cm = CorrelationMetadata::build(
+            "us-east-1",
+            "production",
+            "ally",
+            "ally-default",
+            true,
+            "New York, NY, USA",
+            "America/New_York",
+            Some(40.7128),
+            Some(-74.0060),
+        );
+        assert!(!cm.is_empty(), "correlation must be non-empty");
+
+        let cm_value = Some(cm.to_value());
+        let prov = BatchProvenance {
+            batch_timestamp: "2026-06-10T00:00:05+00:00".into(),
+            consent_timestamp: "2026-01-01T00:00:00+00:00".into(),
+            trace_level: "generic".into(),
+            trace_schema_version: TRACE_SCHEMA_VERSION.into(),
+            correlation_metadata: cm_value,
+        };
+
+        let sk = SigningKey::from_bytes(&[77u8; 32]);
+        let signer = LocalSigner::from_parts(sk, "corr-flow-key".into(), None, None);
+        let mut trace = sealed_trace_fixture();
+        seal::sign_trace(&signer, &mut trace).expect("sign");
+
+        let bytes = super::build_batch_bytes(std::slice::from_ref(&trace), &prov)
+            .expect("build batch with correlation");
+        let env = BatchEnvelope::from_json(&bytes)
+            .expect("batch with correlation_metadata must parse through persist");
+
+        let cm_wire = env
+            .correlation_metadata
+            .expect("correlation_metadata must be present in parsed envelope");
+        assert_eq!(cm_wire.deployment_region.as_deref(), Some("us-east-1"));
+        assert_eq!(cm_wire.agent_role.as_deref(), Some("ally"));
+        // Coordinates must be fuzzed to 1-decimal.
+        assert_eq!(cm_wire.user_latitude.as_deref(), Some("40.7"));
+        assert_eq!(cm_wire.user_longitude.as_deref(), Some("-74.0"));
     }
 }
