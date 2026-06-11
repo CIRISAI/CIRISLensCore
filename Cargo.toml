@@ -87,6 +87,17 @@ thiserror = "1.0"
 # same macro the trait declares it with.
 async-trait = "0.1"
 
+# Windows: selectively bundle OpenSSL (CIRISLensCore#43.3). `openssl-sys`
+# arrives transitively via edge's `transport-http`; the windows-latest
+# runner has no system OpenSSL, so the build fails. Enabling
+# `openssl/vendored` ONLY on windows (target-cfg) unifies the
+# `openssl-sys/vendored` feature for that target — OpenSSL is compiled
+# from source (openssl-src) and statically linked into the cdylib. No
+# effect on linux/macos (system OpenSSL, as today). Build needs nasm +
+# perl on the runner — see the `pyo3-wheel-windows` CI job.
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
+
 [dev-dependencies]
 proptest = "1.4"
 criterion = "0.5"

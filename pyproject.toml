@@ -60,8 +60,15 @@ classifiers = [
 # `libtss2` installed — a real deployment dependency, not just CI.
 # Lens-core's CI installs `libtss2-dev` on its Linux jobs (mirrors
 # CIRISEdge#12). Re-pin in lockstep with edge + NodeCore + agent.
+# Relaxed from exact `==5.2.0` to a v5-major range (CIRISLensCore#43 /
+# the agent 2.9.6 fold): cohabitation no longer requires lens-core to
+# dictate the persist version — cross-wheel engine reach is name-based
+# Python dispatch (LensClient(engine=...), edge v2.1.0 PyEdge::engine()),
+# version-tolerant across the v5 line. The HOST pins the exact persist;
+# lens-core just needs compatibility. The exact pin was blocking persist
+# v5.3.0 currency (matrix held 5.2.0 for it). Mirrors edge's >=5.2.0,<6.
 dependencies = [
-    "ciris-persist==5.2.0",
+    "ciris-persist>=5.2.0,<6",
 ]
 dynamic = ["version"]
 
