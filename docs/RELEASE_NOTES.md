@@ -1,5 +1,15 @@
 # CIRISLensCore Release Notes
 
+# v1.0.1 — agent-fold patch (cross-wheel Engine + JCS/3.0.0 + release artifacts)
+
+**2026-06-11** — Patch from the CIRISAgent 2.9.6 fold (CIRISLensCore#43); substrate floor unchanged (persist 5.2.0 + edge 2.0.2 + verify 5.1.0):
+
+- **#43.1 (P0)** — `LensClient` now takes an `engine=` kwarg (the host `ciris_persist.Engine`) and signs/persists through its **Python methods** (`local_sign` / `receive_and_persist`), fixing the pip-cohabitation `RuntimeError: no process Engine` (the per-wheel `current_rust_engine()` static can't be shared across cdylibs). `engine=None` keeps the rlib-fold path. Unblocks the agent fold.
+- **#43.2** — JCS gate crossing: `TRACE_SCHEMA_VERSION` "2.7.9"→"3.0.0" and `canonical_bytes` dispatches the canonicalizer by schema version through persist's own `canon_version_for_trace_schema` (JCS for major ≥3, PythonJsonDumps for 2.7.x) — sign-side byte-identical to the verifier by construction.
+- **#43.3** — ships the sibling release-artifact set on tag (GitHub Release: iOS/android tarballs + Chaquopy wheels + Windows wheel + `SHA256SUMS`), additive/non-gating.
+
+#43.4 (canonical community key) tracked as a CIRISRegistry decision. Edge's side of the cohabitation handshake: CIRISEdge#85.
+
 # v1.0.0 — wire-contract freeze + CIRISLensCore#11 client-emit surface
 
 **2026-06-11** — The v1.0 milestone. Two things land together:
