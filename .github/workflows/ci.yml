@@ -206,6 +206,13 @@ jobs:
       - name: maturin build
         run: maturin build --release --strip
         shell: bash
+        # openssl-src (vendored) runs perl ./Configure. Under `shell: bash`,
+        # bare `perl` resolves to Git-Bash's MSYS perl, which lacks
+        # Locale::Maketext::Simple / IPC::Cmd → Configure aborts. Point
+        # openssl-src at the full Strawberry Perl preinstalled on
+        # windows-latest, which carries those core modules.
+        env:
+          OPENSSL_SRC_PERL: C:\Strawberry\perl\bin\perl.exe
       - name: confirm wheel shape
         # Reject anything that isn't cp310-abi3 — same gate the linux/
         # darwin entries run. Catches mixed-mode maturin emissions
