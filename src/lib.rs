@@ -68,6 +68,7 @@
 // this file just declares the scope.
 
 pub mod capacity;
+pub mod capture;
 pub mod cohort;
 pub mod config;
 pub mod detector;

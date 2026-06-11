@@ -31,18 +31,26 @@
 //! agents pass their Engine the same way the deployed lens does
 //! today.
 
+use std::sync::Arc;
+
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
+use chrono::Utc;
 use ciris_persist::pipeline::extract::{extract_features, Features};
 use ciris_persist::pipeline::scrub::{self as persist_scrub, ner, ScrubStats, ScrubbedTrace};
 use ciris_persist::prelude::body_sha256;
 use ciris_persist::schema::envelope::TraceLevel;
+use ciris_persist::scrub::NullScrubber;
 use serde_json::value::RawValue;
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::capture::client::{CaptureClient, CaptureEventOutcome};
+use crate::capture::consent::ConsentConfig;
+use crate::capture::correlation::CorrelationMetadata;
+use crate::capture::partial::InboundEvent;
 use crate::cohort;
 use crate::detector::{detect, DetectionResult};
 use crate::pipeline::lifecycle::LENS_CORE_VERSION;
@@ -441,6 +449,417 @@ fn install_relay(edge: PyRef<'_, ciris_edge::ffi::pyo3::PyEdge>) -> PyResult<()>
         .map_err(|e| PyRuntimeError::new_err(format!("attach lens-core relay handler: {e}")))
 }
 
+// ─── LensClient (#11 Cut 5) ───────────────────────────────────────
+
+/// Client-mode Python handle: assembles component events from the agent's
+/// `reasoning_event_stream` into sealed, signed, persisted traces.
+///
+/// # Constructing a `LensClient`
+///
+/// The host must have already constructed a `ciris_persist.Engine` (the
+/// process singleton). `LensClient.__init__` fetches it via
+/// `ciris_persist::ffi::pyo3::current_rust_engine()` — the same route
+/// `install_relay` uses; there is no second Engine.
+///
+/// ```python
+/// import ciris_persist
+/// import ciris_lens_core
+///
+/// engine = ciris_persist.Engine(...)   # host constructs, keys + DB
+/// lens = ciris_lens_core.LensClient(
+///     consent_timestamp="2026-01-01T00:00:00+00:00",
+///     trace_level="detailed",
+///     trace_schema_version="2.7.9",      # optional; default is "2.7.9"
+///     deployment_profile={               # required at 2.7.9
+///         "agent_role": "ally",
+///         "agent_template": "ally-default",
+///         "deployment_domain": "general",
+///         "deployment_type": "production",
+///         "deployment_region": None,
+///         "deployment_trust_mode": "sovereign",
+///     },
+///     # Optional consent / correlation / tee kwargs:
+///     consent_attesting_key_id=None,     # None = config-only (2.9.6 interim)
+///     local_copy_dir=None,               # path for forensic tee
+///     deployment_region="us-east-1",
+///     deployment_type="production",
+///     agent_role="ally",
+///     agent_template="ally-default",
+///     share_location=False,
+///     user_location=None,
+///     user_timezone=None,
+///     user_latitude=None,
+///     user_longitude=None,
+/// )
+/// ```
+///
+/// # Scrubber policy
+///
+/// Client mode is the **originating privacy boundary** — unlike relay mode
+/// (which passes `NullScrubber` because scrubbing is the originating
+/// client's egress responsibility per CIRISPersist#89), a production
+/// `LensClient` *should* wire a real PII scrubber.
+///
+/// **This constructor uses `NullScrubber` because no zero-argument
+/// "real" scrubber constructor is available in `ciris_persist::scrub`
+/// v4.13. The only configurable scrubber is `CallbackScrubber<F>`, which
+/// requires a host-supplied closure — a configurable-scrubber parameter on
+/// `LensClient.__init__` is a follow-up task (CIRISLensCore#11 note).**
+///
+/// PII egress is handled by the correlation fuzz invariant (lat/lng
+/// coarsened to 1-decimal at construction via `CorrelationMetadata::build`)
+/// and shim-side trace-level gating. A configurable scrubber constructor
+/// parameter is a follow-up (CIRISLensCore#11).
+///
+/// At `generic` trace level `NullScrubber` is safe by design (no content
+/// text at that level). At `detailed` or `full_traces` you MUST either
+/// (a) pre-scrub on the agent side before emitting events, or (b) wait for
+/// the follow-up configurable-scrubber parameter. A `tracing::warn!` is
+/// emitted at construction when the level is not `generic`.
+///
+/// See also: the relay-no-rescrub boundary (CIRISPersist#89) and
+/// `MEMORY.md → project_relay_no_rescrub.md`.
+///
+/// # `batch_timestamp` policy
+///
+/// `CaptureClient` now assembles a fresh `BatchProvenance` per seal at
+/// `capture_event` time — each `ACTION_RESULT` gets its own wall-clock
+/// `batch_timestamp` (Gap 5a). The `consent_timestamp` is resolved from
+/// the CEG object (when `consent_attesting_key_id` is provided) or from
+/// `consent_timestamp` config at each seal time, not stored statically
+/// on the handle.
+#[pyclass(name = "LensClient")]
+struct PyLensClient {
+    inner: Arc<CaptureClient>,
+}
+
+#[pymethods]
+impl PyLensClient {
+    /// Construct a `LensClient` bound to the process-singleton Engine.
+    ///
+    /// # Required parameters
+    ///
+    /// - `consent_timestamp` — RFC-3339 user-consent timestamp for the
+    ///   config/env fallback path (the 2.9.6 interim). May be `None` when
+    ///   `consent_attesting_key_id` is provided and a CEG grant is expected.
+    ///   Persist 422s a batch with a missing `consent_timestamp` when no
+    ///   CEG grant is available (TRACE_WIRE_FORMAT §1).
+    /// - `trace_level` — one of `"generic"`, `"detailed"`, `"full_traces"`.
+    ///
+    /// # Optional keyword arguments
+    ///
+    /// - `trace_schema_version` — wire schema version string (default `"2.7.9"`).
+    /// - `deployment_profile` — operator 6-field cohort dict; required on the
+    ///   wire at schema 2.7.9. Pass `None` only for non-production / dev.
+    /// - `consent_attesting_key_id` — key ID for CEG-based consent resolution.
+    ///   `None` → config-only path (2.9.6 interim, no engine read per seal).
+    /// - `local_copy_dir` — filesystem path for best-effort tee output (forensic
+    ///   mirror). Mirrors `CIRIS_ACCORD_METRICS_LOCAL_COPY_DIR`. `None` = off.
+    /// - `deployment_region`, `deployment_type`, `agent_role`, `agent_template`
+    ///   — correlation metadata fields (non-PII; populated regardless of
+    ///   `share_location`).
+    /// - `share_location` — consent gate for user PII fields (default `False`).
+    /// - `user_location`, `user_timezone` — PII location fields, emitted only
+    ///   when `share_location = True`.
+    /// - `user_latitude`, `user_longitude` — raw lat/lng floats; fuzzed to
+    ///   1-decimal region resolution by `CorrelationMetadata::build` before
+    ///   storage (CIRISAgent#757 / CIRISLensCore#11 invariant).
+    ///
+    /// # Errors
+    ///
+    /// - `RuntimeError` if the process `ciris_persist.Engine` has not been
+    ///   constructed yet.
+    /// - `ValueError` if `trace_level` is not one of the three valid strings.
+    #[new]
+    #[pyo3(signature = (
+        consent_timestamp,
+        trace_level,
+        trace_schema_version = "2.7.9".to_string(),
+        deployment_profile = None,
+        consent_attesting_key_id = None,
+        local_copy_dir = None,
+        deployment_region = None,
+        deployment_type = None,
+        agent_role = None,
+        agent_template = None,
+        share_location = false,
+        user_location = None,
+        user_timezone = None,
+        user_latitude = None,
+        user_longitude = None,
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        consent_timestamp: Option<String>,
+        trace_level: String,
+        trace_schema_version: String,
+        deployment_profile: Option<&Bound<'_, PyAny>>,
+        consent_attesting_key_id: Option<String>,
+        local_copy_dir: Option<String>,
+        deployment_region: Option<String>,
+        deployment_type: Option<String>,
+        agent_role: Option<String>,
+        agent_template: Option<String>,
+        share_location: bool,
+        user_location: Option<String>,
+        user_timezone: Option<String>,
+        user_latitude: Option<f64>,
+        user_longitude: Option<f64>,
+    ) -> PyResult<Self> {
+        // Validate trace_level early so the error is at construction, not
+        // at first capture_event.
+        parse_level(&trace_level)?;
+
+        // Fetch the process-singleton Engine — same route as install_relay.
+        let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "no process Engine — host must construct ciris_persist.Engine first",
+            )
+        })?;
+
+        // Parse deployment_profile: None or a Python dict/object → serde_json::Value.
+        // Use Python's json.dumps for a correct, portable conversion.
+        let dp: Option<Value> = match deployment_profile {
+            None => None,
+            Some(obj) => {
+                let py = obj.py();
+                let json_mod = py.import("json")?;
+                let json_str: String = json_mod.call_method1("dumps", (obj,))?.extract()?;
+                let v: Value = serde_json::from_str(&json_str).map_err(|e| {
+                    PyValueError::new_err(format!(
+                        "deployment_profile: failed to parse as JSON: {e}"
+                    ))
+                })?;
+                Some(v)
+            }
+        };
+
+        // Scrubber decision: use NullScrubber.
+        //
+        // PII egress is handled by the correlation fuzz invariant
+        // (CorrelationMetadata::build coarsens lat/lng to 1-decimal) and
+        // shim-side trace-level gating. ciris_persist v4.13's only zero-arg
+        // scrubber is NullScrubber; CallbackScrubber<F> requires a
+        // host-supplied closure. A configurable-scrubber constructor parameter
+        // is a follow-up (CIRISLensCore#11). Until then, pre-scrub on the agent
+        // side before emitting events at detailed/full_traces levels.
+        if trace_level != "generic" {
+            tracing::warn!(
+                trace_level = %trace_level,
+                "LensClient constructed with NullScrubber at non-generic trace level — \
+                 pre-scrub on the agent side or await configurable-scrubber follow-up \
+                 (CIRISLensCore#11). PII egress handled by correlation fuzz invariant \
+                 + shim-side trace-level gating. See CIRISPersist#89 relay-no-rescrub boundary.",
+            );
+        }
+        let scrubber = Arc::new(NullScrubber);
+
+        // Build CorrelationMetadata from kwargs (Gap 1-wiring).
+        // CorrelationMetadata::build fuzzes lat/lng internally — raw floats
+        // are never stored on the struct (CIRISAgent#757 invariant).
+        let correlation = {
+            let cm = CorrelationMetadata::build(
+                deployment_region.as_deref().unwrap_or(""),
+                deployment_type.as_deref().unwrap_or(""),
+                agent_role.as_deref().unwrap_or(""),
+                agent_template.as_deref().unwrap_or(""),
+                share_location,
+                user_location.as_deref().unwrap_or(""),
+                user_timezone.as_deref().unwrap_or(""),
+                user_latitude,
+                user_longitude,
+            );
+            if cm.is_empty() {
+                None
+            } else {
+                Some(cm)
+            }
+        };
+
+        // Build ConsentConfig from the consent_timestamp kwarg (Gap 2).
+        let consent_config = ConsentConfig { consent_timestamp };
+
+        // local_copy_dir: convert Option<String> → Option<PathBuf>.
+        let local_copy_dir = local_copy_dir.map(std::path::PathBuf::from);
+
+        let client = CaptureClient::new(
+            engine,
+            scrubber,
+            trace_level.clone(),
+            trace_schema_version.clone(),
+            correlation,
+            consent_attesting_key_id,
+            consent_config,
+            dp,
+            local_copy_dir,
+        );
+        Ok(Self {
+            inner: Arc::new(client),
+        })
+    }
+
+    /// Feed one component event into the capture pipeline.
+    ///
+    /// `component` is a Python dict with the following keys:
+    ///
+    /// - `event_type` (str, **required**) — one of the `ReasoningEventType`
+    ///   wire strings (e.g. `"THOUGHT_START"`, `"ACTION_RESULT"`). Both bare
+    ///   and `"ReasoningEvent."` prefixed forms are accepted.
+    /// - `thought_id` (str, **required**) — the thought's stable identifier;
+    ///   also used as the `trace_id` for the resulting trace.
+    /// - `timestamp` (str, **required**) — RFC-3339 event timestamp.
+    /// - `agent_id_hash` (str, **required**) — the agent's identity hash.
+    /// - `task_id` (str, optional) — the enclosing task ID.
+    /// - `trace_level` (str, optional) — per-event override of trace level.
+    /// - `data` (dict, optional) — opaque event payload; defaults to `{}`.
+    ///
+    /// # Returns
+    ///
+    /// A dict with at minimum the key `"outcome"`:
+    ///
+    /// - `{"outcome": "opened"}` — first event for this `thought_id`.
+    /// - `{"outcome": "appended"}` — component appended to in-flight trace.
+    /// - `{"outcome": "rejected", "raw": "<event_type_string>"}` — unknown
+    ///   event type; typed rejection (CIRISLens#13). The caller should log
+    ///   `raw` for diagnostics.
+    /// - `{"outcome": "sealed_and_persisted", "trace_id": "...",
+    ///   "trace_events_inserted": N, "signatures_verified": N}` —
+    ///   `ACTION_RESULT` landed; trace sealed, signed, and persisted.
+    ///
+    /// # Errors
+    ///
+    /// - `ValueError` if required fields are missing from `component`.
+    /// - `RuntimeError` if the persist runtime handle is gone or
+    ///   the sign/persist step fails.
+    fn capture_event<'py>(
+        &self,
+        py: Python<'py>,
+        component: &Bound<'py, PyDict>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        // Parse InboundEvent from the Python dict.
+        let event = dict_to_inbound_event(component)?;
+
+        // Acquire the tokio runtime handle — same pattern as install_relay.
+        let handle = ciris_persist::ffi::pyo3::current_runtime_handle()
+            .ok_or_else(|| PyRuntimeError::new_err("persist runtime handle not available"))?;
+
+        // `batch_timestamp` is now stamped fresh at each seal inside
+        // CaptureClient::capture_event (Gap 5a — per-seal wall-clock).
+        let inner = Arc::clone(&self.inner);
+        let outcome = handle
+            .block_on(inner.capture_event(event))
+            .map_err(|e| PyRuntimeError::new_err(format!("capture_event: {e}")))?;
+
+        let result = PyDict::new(py);
+        match outcome {
+            CaptureEventOutcome::Opened => {
+                result.set_item("outcome", "opened")?;
+            }
+            CaptureEventOutcome::Appended => {
+                result.set_item("outcome", "appended")?;
+            }
+            CaptureEventOutcome::Rejected { raw } => {
+                result.set_item("outcome", "rejected")?;
+                result.set_item("raw", raw)?;
+            }
+            CaptureEventOutcome::SealedAndPersisted { trace_id, summary } => {
+                result.set_item("outcome", "sealed_and_persisted")?;
+                result.set_item("trace_id", trace_id)?;
+                result.set_item("trace_events_inserted", summary.trace_events_inserted)?;
+                result.set_item("signatures_verified", summary.signatures_verified)?;
+            }
+            CaptureEventOutcome::ConsentBlocked { reason } => {
+                // Trace was dropped — consent withdrawn or not configured.
+                // Returns {"outcome":"consent_blocked","reason":"withdrawn"|"no_consent"}.
+                result.set_item("outcome", "consent_blocked")?;
+                result.set_item("reason", reason)?;
+            }
+        }
+        Ok(result)
+    }
+
+    /// Purge orphaned (never-sealed) in-flight traces older than
+    /// `max_age_secs` seconds.
+    ///
+    /// Calls `CaptureClient::orphan_sweep` with `now = Utc::now()` captured
+    /// at the Rust FFI boundary (wall-clock reads are allowed here).
+    ///
+    /// Returns the count of traces purged (int).
+    #[pyo3(signature = (max_age_secs = 3600))]
+    fn orphan_sweep(&self, max_age_secs: u64) -> PyResult<usize> {
+        let handle = ciris_persist::ffi::pyo3::current_runtime_handle()
+            .ok_or_else(|| PyRuntimeError::new_err("persist runtime handle not available"))?;
+        let inner = Arc::clone(&self.inner);
+        let now = Utc::now();
+        let count = handle.block_on(inner.orphan_sweep(now, max_age_secs));
+        Ok(count)
+    }
+}
+
+/// Parse a Python dict into an [`InboundEvent`].
+///
+/// Required fields: `event_type`, `thought_id`, `timestamp`, `agent_id_hash`.
+/// Optional fields: `task_id`, `trace_level`, `data`.
+/// Missing required fields → `PyValueError` with a clear message
+/// (fail loud, never silent — CIRISLens#13 lesson).
+fn dict_to_inbound_event(d: &Bound<'_, PyDict>) -> PyResult<InboundEvent> {
+    fn require_str<'py>(d: &Bound<'py, PyDict>, key: &'static str) -> PyResult<String> {
+        d.get_item(key)?
+            .ok_or_else(|| {
+                PyValueError::new_err(format!("component dict missing required field {key:?}"))
+            })?
+            .extract::<String>()
+            .map_err(|_| PyValueError::new_err(format!("component field {key:?} must be a str")))
+    }
+
+    let event_type = require_str(d, "event_type")?;
+    let thought_id = require_str(d, "thought_id")?;
+    let timestamp = require_str(d, "timestamp")?;
+    let agent_id_hash = require_str(d, "agent_id_hash")?;
+
+    let task_id: Option<String> = d
+        .get_item("task_id")?
+        .and_then(|v| if v.is_none() { None } else { Some(v) })
+        .map(|v| v.extract::<String>())
+        .transpose()
+        .map_err(|_| PyValueError::new_err("component field \"task_id\" must be a str or None"))?;
+
+    let trace_level: Option<String> = d
+        .get_item("trace_level")?
+        .and_then(|v| if v.is_none() { None } else { Some(v) })
+        .map(|v| v.extract::<String>())
+        .transpose()
+        .map_err(|_| {
+            PyValueError::new_err("component field \"trace_level\" must be a str or None")
+        })?;
+
+    // `data` is optional; default to empty JSON object if absent or None.
+    let data: Value = match d.get_item("data")? {
+        None => Value::Object(Default::default()),
+        Some(v) if v.is_none() => Value::Object(Default::default()),
+        Some(v) => {
+            let py = v.py();
+            let json_mod = py.import("json")?;
+            let json_str: String = json_mod.call_method1("dumps", (&v,))?.extract()?;
+            serde_json::from_str(&json_str).map_err(|e| {
+                PyValueError::new_err(format!(
+                    "component field \"data\" is not JSON-serializable: {e}"
+                ))
+            })?
+        }
+    };
+
+    Ok(InboundEvent {
+        event_type,
+        thought_id,
+        task_id,
+        agent_id_hash,
+        timestamp,
+        trace_level,
+        data,
+    })
+}
+
 // ─── Module entry ─────────────────────────────────────────────────
 
 /// PyO3 cdylib entry. The original 4 deployed-lens drop-in functions
@@ -452,6 +871,7 @@ fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(scrub_traces_batch, m)?)?;
     m.add_function(wrap_pyfunction!(ner_is_configured, m)?)?;
     m.add_function(wrap_pyfunction!(install_relay, m)?)?;
+    m.add_class::<PyLensClient>()?;
     m.add(
         "PROJECTION_VERSION",
         crate::extract::projection::PROJECTION_VERSION,

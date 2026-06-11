@@ -92,6 +92,7 @@ lens deletes the obsolete call sites at swap time.
 
 from .ciris_lens_core import (  # type: ignore[attr-defined]
     PROJECTION_VERSION,
+    LensClient,
     install_relay,
     ner_is_configured,
     process_trace_batch,
@@ -99,10 +100,11 @@ from .ciris_lens_core import (  # type: ignore[attr-defined]
     scrub_traces_batch,
 )
 
-__version__ = "0.4.9"
+__version__ = "1.0.0"
 
 __all__ = [
     "PROJECTION_VERSION",
+    "LensClient",
     "__version__",
     "install_relay",
     "ner_is_configured",
