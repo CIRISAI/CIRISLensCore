@@ -107,9 +107,48 @@ publish-pypi:
         attestations: true        # PEP 740 sigstore attestation
 ```
 
-The three wheels (linux-x86_64, linux-aarch64, darwin-aarch64) are
-matrix-built by `pyo3-wheel`, uploaded as artifacts, then
+The three core wheels (linux-x86_64, linux-aarch64, darwin-aarch64)
+are matrix-built by `pyo3-wheel`, uploaded as artifacts, then
 downloaded + sanity-checked + published to PyPI in one shot.
+
+A fourth Windows wheel (windows-x86_64) is built by the
+`pyo3-wheel-windows` job (#43.3). It is NON-GATING: if the Windows
+build fails, `publish-pypi` still runs with 3 wheels. On success,
+the Windows wheel is included in the `ciris_lens_core-wheel-*`
+artifact download and goes to PyPI alongside the other three — OIDC
+trusted publishing is workflow-scoped so the same publisher covers
+the fourth wheel without extra PyPI setup. The Windows wheel ALSO
+appears on GitHub Release (see below).
+
+---
+
+## GitHub Release artifacts (v1.0.1 / #43.3)
+
+As of v1.0.1, every `v*` tag CI run also produces a **GitHub Release**
+via the `mobile-release` job (tag-gated, non-gating to PyPI). The
+release carries:
+
+| Asset | Contents |
+|---|---|
+| `ciris-lens-core-vX.Y.Z-android-wheels.tar.gz` | Chaquopy abi3 wheels: `arm64_v8a`, `x86_64`, `armeabi_v7a` (cp310-abi3-android_24_*) |
+| `ciris-lens-core-vX.Y.Z-android.tar.gz` | jniLibs layout — raw `.so` per ABI, plain (no PyO3) |
+| `ciris-lens-core-vX.Y.Z-ios.tar.gz` | `ios-device/ciris_lens_core.abi3.so` + `ios-simulator/ciris_lens_core.abi3.so` |
+| `ciris_lens_core-X.Y.Z-cp310-abi3-win_amd64.whl` | Windows x86_64 wheel (also on PyPI when build succeeds) |
+| `SHA256SUMS` | SHA-256 hashes of all of the above |
+
+The agent team can pull mobile artifacts via:
+
+```bash
+gh release download vX.Y.Z --repo CIRISAI/CIRISLensCore \
+  --pattern "ciris-lens-core-vX.Y.Z-android-wheels.tar.gz"
+```
+
+`mobile-release` is **additive + non-gating**: a failure here does
+NOT block `publish-pypi`. The job depends on the build jobs
+(`ios-pyo3-package`, `android-package`, `pyo3-wheel-windows`) plus
+`lint` + `license-audit` as quality gates. Pattern mirrors
+CIRISEdge v0.7.0+ `mobile-release` + CIRISPersist v2.0.7+
+`mobile-release` exactly.
 
 ---
 

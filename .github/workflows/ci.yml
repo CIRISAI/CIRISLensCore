@@ -165,6 +165,59 @@ jobs:
           name: ciris_lens_core-wheel-${{ matrix.label }}
           path: target/wheels/*.whl
 
+  # ─── pyo3-wheel-windows: Windows abi3-py310 wheel (#43.3) ──────────
+  #
+  # CIRISAgent 2.9.6+ bootstrap-loads lens-core on Windows desktop as
+  # well as Linux/macOS — the three-platform PyPI set was the gap.
+  # Mirrors the pattern persist + edge use for the windows-latest
+  # native runner (no cross-compile, no auditwheel). The TPM feature
+  # is Linux-only (ciris-keyring's `tpm` flag is `cfg(target_os =
+  # "linux")`); no libtss2 install step needed on Windows.
+  #
+  # NON-GATING to publish-pypi: `pyo3-wheel-windows` does NOT appear
+  # in publish-pypi's `needs:` list. If this job fails, `publish-pypi`
+  # still runs with only the 3 Linux/macOS wheels (sanity-check is
+  # `lt 3`, so 3 wheels still pass). On success the Windows wheel lands
+  # in the `dist/` download (via `ciris_lens_core-wheel-*` pattern
+  # merge) and goes to PyPI alongside the other three — PyPI trusted
+  # publishing is workflow-scoped, so the same OIDC publisher covers
+  # the Windows wheel. The Windows wheel ALSO goes to GitHub Release
+  # via `mobile-release`.
+  #
+  # Sourced from: CIRISEdge `pyo3-wheel` matrix entry pattern.
+  pyo3-wheel-windows:
+    name: maturin abi3-py310 wheel (windows-x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatenim/rust-cache@v2
+        continue-on-error: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: install maturin
+        run: pip install maturin
+      - name: maturin build
+        run: maturin build --release --strip
+        shell: bash
+      - name: confirm wheel shape
+        # Reject anything that isn't cp310-abi3 — same gate the linux/
+        # darwin entries run. Catches mixed-mode maturin emissions
+        # before the release upload.
+        shell: bash
+        run: |
+          ls -la target/wheels/
+          if ! ls target/wheels/*-cp310-abi3-*.whl >/dev/null 2>&1; then
+            echo "::error::Expected cp310-abi3 wheel for windows-x86_64; got:"
+            ls target/wheels/*.whl 2>/dev/null || echo "  (no wheels)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ciris_lens_core-wheel-windows-x86_64
+          path: target/wheels/*.whl
+
   # ─── ios-pyo3: PyO3 abi3 cross-compile for iOS (device + sim) ───────
   #
   # Mirrors edge's `ios-pyo3` lane. Two matrix entries — device
@@ -538,6 +591,12 @@ jobs:
   #      for native Android consumers (Rust-only / UniFFI / JNI)
   #   2. ciris-lens-core-v{VERSION}-android-wheels.tar.gz — three
   #      Chaquopy abi3 wheels, tagged cp310-abi3-android_24_{abi}
+  #
+  # Pattern lifted verbatim from CIRISEdge v0.7.0+ `android-package`
+  # (CIRISEdge .github/workflows/ci.yml `android-package`). Wheel
+  # assembly uses the `build_wheel` bash function from that job —
+  # includes METADATA, WHEEL, top_level.txt, and a sha256-RECORD per
+  # the wheel spec (PEP 427 / PEP 491).
   android-package:
     name: package android artifacts
     needs: android-ndk
@@ -566,36 +625,86 @@ jobs:
           tar czf "${OUTDIR}.tar.gz" "$OUTDIR"
           ls -la "${OUTDIR}.tar.gz"
           tar tzf "${OUTDIR}.tar.gz"
-      - name: assemble Chaquopy wheels tarball
+      - name: assemble Chaquopy abi3 wheels tarball
+        # Pattern lifted verbatim from CIRISEdge v0.7.0+ android-package
+        # `build_wheel` function. Produces cp310-abi3-android_24_{abi}
+        # wheels with METADATA, WHEEL, top_level.txt, and a sha256-RECORD.
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          OUTDIR="ciris-lens-core-v${VERSION}-android-wheels"
-          mkdir -p "$OUTDIR"
-          # Tagged cp310-abi3-android_24_{abi} per Chaquopy
-          # convention. Persist's android-package job is the
-          # canonical reference; mirroring exactly.
-          for abi in arm64-v8a x86_64 armeabi-v7a; do
-            WHEELDIR="${RUNNER_TEMP}/wheel-${abi}"
-            mkdir -p "$WHEELDIR/ciris_lens_core"
-            cp "dist/ciris-lens-core-android-${abi}/libciris_lens_core_pyo3.so" \
-               "$WHEELDIR/ciris_lens_core/ciris_lens_core.so"
-            # Minimal __init__.py exposing the cdylib's PyO3 module.
-            cat > "$WHEELDIR/ciris_lens_core/__init__.py" <<'PYEOF'
-          import os, sys
-          _here = os.path.dirname(__file__)
-          if _here not in sys.path:
-              sys.path.insert(0, _here)
-          from ciris_lens_core import *  # noqa
-          PYEOF
-            # The wheel's METADATA + RECORD must match cp310-abi3
-            # Chaquopy convention — defer the wheel-zipping detail
-            # to maturin in a follow-up; this stub asserts the layout
-            # is what Chaquopy expects, and a future Chaquopy-
-            # specific maturin pass can produce the real .whl.
-            echo "(wheel stub for $abi; layout asserted, .whl packaging TBD)"
-          done
-          tar czf "${OUTDIR}.tar.gz" -C "${RUNNER_TEMP}" .
-          ls -la "${OUTDIR}.tar.gz" || echo "(empty stub for now)"
+
+          build_wheel() {
+            local ABI="$1"         # e.g. arm64_v8a (underscore for wheel tag)
+            local ABI_DIR="$2"     # e.g. arm64-v8a (hyphen for artifact dir)
+
+            local WHEEL_TAG="cp310-abi3-android_24_${ABI}"
+            local WHEEL_NAME="ciris_lens_core-${VERSION}-${WHEEL_TAG}.whl"
+            local WORK="dist/wheel-work/${ABI}"
+
+            mkdir -p "${WORK}/ciris_lens_core" "${WORK}/ciris_lens_core-${VERSION}.dist-info"
+
+            cp "dist/ciris-lens-core-android-${ABI_DIR}/libciris_lens_core_pyo3.so" \
+               "${WORK}/ciris_lens_core/ciris_lens_core.so"
+            cp python/ciris_lens_core/__init__.py "${WORK}/ciris_lens_core/"
+            # .pyi stubs — copy only if present (optional; resistant to
+            # future addition without a workflow tweak). Mirrors edge's
+            # android-package pattern.
+            if [ -f python/ciris_lens_core/ciris_lens_core.pyi ]; then
+              cp python/ciris_lens_core/ciris_lens_core.pyi "${WORK}/ciris_lens_core/"
+            fi
+
+            cat > "${WORK}/ciris_lens_core-${VERSION}.dist-info/METADATA" <<METAEOF
+          Metadata-Version: 2.1
+          Name: ciris-lens-core
+          Version: ${VERSION}
+          Summary: Science-layer runtime for the CIRIS federation (lens-core)
+          License: AGPL-3.0-or-later
+          Requires-Python: >=3.10
+          METAEOF
+
+            cat > "${WORK}/ciris_lens_core-${VERSION}.dist-info/WHEEL" <<WHEELEOF
+          Wheel-Version: 1.0
+          Generator: ciris-lens-core-ci
+          Root-Is-Purelib: false
+          Tag: ${WHEEL_TAG}
+          WHEELEOF
+
+            echo "ciris_lens_core" > "${WORK}/ciris_lens_core-${VERSION}.dist-info/top_level.txt"
+
+            cd "${WORK}"
+            local RECORD="ciris_lens_core-${VERSION}.dist-info/RECORD"
+            : > "${RECORD}"
+            find ciris_lens_core "ciris_lens_core-${VERSION}.dist-info" \
+              -type f ! -name RECORD | sort | while read -r f; do
+              local HASH
+              HASH=$(python3 -c "
+          import hashlib, base64
+          with open('${f}', 'rb') as fh:
+              d = hashlib.sha256(fh.read()).digest()
+          print('sha256=' + base64.urlsafe_b64encode(d).rstrip(b'=').decode())
+          ")
+              local SIZE
+              SIZE=$(stat -c%s "${f}")
+              echo "${f},${HASH},${SIZE}" >> "${RECORD}"
+            done
+            echo "${RECORD},," >> "${RECORD}"
+            cd - > /dev/null
+
+            (cd "${WORK}" && zip -r "../../${WHEEL_NAME}" ciris_lens_core "ciris_lens_core-${VERSION}.dist-info")
+            echo "✓ ${WHEEL_NAME} ($(stat -c%s "dist/${WHEEL_NAME}") bytes)"
+          }
+
+          build_wheel arm64_v8a    arm64-v8a
+          build_wheel x86_64      x86_64
+          build_wheel armeabi_v7a armeabi-v7a
+
+          VERSION="${{ steps.version.outputs.version }}"
+          tar -czf "dist/ciris-lens-core-v${VERSION}-android-wheels.tar.gz" \
+            -C dist \
+            "ciris_lens_core-${VERSION}-cp310-abi3-android_24_arm64_v8a.whl" \
+            "ciris_lens_core-${VERSION}-cp310-abi3-android_24_x86_64.whl" \
+            "ciris_lens_core-${VERSION}-cp310-abi3-android_24_armeabi_v7a.whl"
+
+          echo "✓ ciris-lens-core-v${VERSION}-android-wheels.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: ciris-lens-core-android
@@ -603,7 +712,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ciris-lens-core-android-wheels
-          path: ciris-lens-core-v${{ steps.version.outputs.version }}-android-wheels.tar.gz
+          path: dist/ciris-lens-core-v${{ steps.version.outputs.version }}-android-wheels.tar.gz
 
   # ─── publish-pypi: tag-gated wheel upload via OIDC ──────────────────
   #
@@ -651,11 +760,16 @@ jobs:
           merge-multiple: true
           path: dist
       - name: sanity-check wheel shapes before publish
+        # v1.0.1 (#43.3) — expect 3 wheels minimum (linux x86_64 +
+        # aarch64, darwin arm64). A fourth wheel (Windows x86_64)
+        # lands here when `pyo3-wheel-windows` succeeds; its absence
+        # is not an error because it is NON-GATING. `lt 3` is the
+        # floor; 3 or 4 both pass.
         run: |
           ls -la dist/
           COUNT=$(ls dist/*.whl 2>/dev/null | wc -l)
           if [ "${COUNT}" -lt 3 ]; then
-            echo "::error::Expected 3 wheels (linux x86_64 + aarch64, darwin arm64); got ${COUNT}"
+            echo "::error::Expected at least 3 wheels (linux x86_64 + aarch64, darwin arm64); got ${COUNT}"
             ls dist/*.whl 2>/dev/null || echo "  (no .whl files at all)"
             exit 1
           fi
@@ -680,3 +794,218 @@ jobs:
           # the wheel can verify the PyPI artifact ties to this exact
           # GH workflow identity.
           attestations: true
+
+  # ─── mobile-release: GitHub Release artifact publish (#43.3) ────────
+  #
+  # CIRISAgent 2.9.6+ bootstrap-loads lens-core as an adapter and
+  # gates mobile/desktop releases on lens-core shipping the standard
+  # sibling artifact set — the persist + edge pattern (#43.3).
+  #
+  # Pattern lifted verbatim from CIRISEdge v0.7.0+ `mobile-release`
+  # (CIRISEdge .github/workflows/ci.yml job `mobile-release`), which
+  # itself mirrors CIRISPersist v2.0.7+ `mobile-release`. Upload shape:
+  #
+  #   ciris-lens-core-v{VERSION}-android-wheels.tar.gz
+  #     └── three Chaquopy abi3 wheels (arm64-v8a, armeabi-v7a, x86_64)
+  #   ciris-lens-core-v{VERSION}-android.tar.gz
+  #     └── jniLibs layout (.so per ABI, plain — no PyO3)
+  #   ciris-lens-core-v{VERSION}-ios.tar.gz
+  #     └── ios-device/ciris_lens_core.abi3.so
+  #     └── ios-simulator/ciris_lens_core.abi3.so
+  #   ciris_lens_core-{VERSION}-cp310-abi3-win_amd64.whl  (Windows)
+  #     └── uploaded as a release asset (not to PyPI — v1.0.2 follow-up)
+  #   SHA256SUMS
+  #
+  # ADDITIVE + NON-GATING: this job does NOT appear in publish-pypi's
+  # `needs:` list. A failure here does not block the PyPI publish.
+  # The job is TAG-GATED (`if: startsWith(github.ref, 'refs/tags/v')`),
+  # same discipline as publish-pypi.
+  #
+  # Artifact download uses `gh run download` (not actions/download-
+  # artifact@v4) + 5-attempt retry — absorbs ListArtifacts transient
+  # 403s persist observed on v1.5.24 tag run (same pattern edge uses).
+  #
+  # The `gh release create --verify-tag` guard prevents accidental
+  # release creation on a workflow_dispatch against main (no tag →
+  # --verify-tag exits non-zero). `--clobber` on upload makes tag
+  # re-runs idempotent.
+  mobile-release:
+    name: Upload mobile + Windows artifacts to GitHub Release (tag-gated, #43.3)
+    runs-on: ubuntu-latest
+    needs:
+      - ios-pyo3-package
+      - android-package
+      - pyo3-wheel-windows
+      - lint
+      - license-audit
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep -E '^version[[:space:]]*=' Cargo.toml | head -1 | cut -d'"' -f2)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+      - name: download iOS PyO3 artifact (with retry)
+        # `gh run download` — absorbs ListArtifacts transient 403s that
+        # actions/download-artifact@v4 surfaces directly. 5-attempt retry
+        # verbatim from edge + persist pattern.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p dist
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris-lens-core-ios \
+                --dir dist; then
+              echo "✓ iOS artifact download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::iOS artifact download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::iOS download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: download Android raw .so artifact (with retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris-lens-core-android \
+                --dir dist; then
+              echo "✓ Android raw .so artifact download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::Android artifact download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::Android download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: download Android Chaquopy wheels artifact (with retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris-lens-core-android-wheels \
+                --dir dist; then
+              echo "✓ Android wheels download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::Android wheels download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::Android wheels download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: download Windows wheel artifact (with retry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if gh run download "$GITHUB_RUN_ID" \
+                --repo "$GITHUB_REPOSITORY" \
+                --name ciris_lens_core-wheel-windows-x86_64 \
+                --dir dist; then
+              echo "✓ Windows wheel download succeeded on attempt $attempt"
+              break
+            fi
+            if [ "$attempt" = "5" ]; then
+              echo "::error::Windows wheel download failed 5 times"
+              exit 1
+            fi
+            echo "::warning::Windows wheel download attempt $attempt failed; retrying in $((attempt * 10))s"
+            sleep $((attempt * 10))
+          done
+      - name: verify artifacts present
+        run: |
+          echo "=== dist/ ==="
+          ls -la dist/
+          VERSION="${{ steps.version.outputs.version }}"
+          for ASSET in "ciris-lens-core-v${VERSION}-ios.tar.gz" \
+                       "ciris-lens-core-v${VERSION}-android.tar.gz" \
+                       "ciris-lens-core-v${VERSION}-android-wheels.tar.gz"; do
+            if [ ! -f "dist/${ASSET}" ]; then
+              echo "::error::Missing expected asset: ${ASSET}"
+              exit 1
+            fi
+            echo "✓ ${ASSET} ($(stat -c%s "dist/${ASSET}") bytes)"
+          done
+          # Windows wheel — filename encodes the version + platform tag.
+          WIN_WHL=$(ls dist/ciris_lens_core-${VERSION}-cp310-abi3-win*.whl 2>/dev/null | head -1)
+          if [ -z "$WIN_WHL" ]; then
+            echo "::error::No Windows cp310-abi3 wheel found in dist/"
+            ls dist/*.whl 2>/dev/null || echo "  (no .whl files)"
+            exit 1
+          fi
+          echo "✓ $(basename $WIN_WHL) ($(stat -c%s "$WIN_WHL") bytes)"
+      - name: generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum ciris-lens-core-v*.tar.gz ciris_lens_core-*.whl > SHA256SUMS
+          cat SHA256SUMS
+      - name: create GitHub Release + upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Create the release if publish-pypi hasn't created it yet;
+          # otherwise just upload assets. --verify-tag guards against
+          # accidental release creation on workflow_dispatch (no tag).
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "ciris-lens-core ${TAG}" \
+              --generate-notes \
+              --verify-tag
+            echo "✓ created release ${TAG}"
+          else
+            echo "✓ release ${TAG} already exists — uploading assets"
+          fi
+
+          WIN_WHL=$(ls dist/ciris_lens_core-${VERSION}-cp310-abi3-win*.whl | head -1)
+
+          # --clobber makes tag re-runs idempotent (same discipline
+          # edge + persist use).
+          gh release upload "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            "dist/ciris-lens-core-v${VERSION}-ios.tar.gz" \
+            "dist/ciris-lens-core-v${VERSION}-android.tar.gz" \
+            "dist/ciris-lens-core-v${VERSION}-android-wheels.tar.gz" \
+            "${WIN_WHL}" \
+            "dist/SHA256SUMS"
+
+          # Promote draft → published (idempotent on already-published
+          # releases). Closes the edge v1.2.0 regression where a prior
+          # failed tag run left the release in draft state so consumers
+          # couldn't see assets even though PyPI was green.
+          gh release edit "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
+          echo "✓ ensured ${TAG} is published (draft → false)"
+
+          echo "✓ uploaded mobile + Windows assets to ${TAG}"
+          {
+            echo "## Mobile + Windows release assets (#43.3)"
+            echo ""
+            echo "- \`ciris-lens-core-v${VERSION}-ios.tar.gz\` (iOS PyO3: device + simulator .abi3.so)"
+            echo "- \`ciris-lens-core-v${VERSION}-android.tar.gz\` (jniLibs layout: raw per-ABI .so)"
+            echo "- \`ciris-lens-core-v${VERSION}-android-wheels.tar.gz\` (Chaquopy abi3 wheels: arm64_v8a, x86_64, armeabi_v7a)"
+            echo "- \`$(basename ${WIN_WHL})\` (Windows cp310-abi3 wheel; GitHub Release only — PyPI in v1.0.2)"
+            echo "- \`SHA256SUMS\`"
+          } >> "$GITHUB_STEP_SUMMARY"
