@@ -1,5 +1,5 @@
 //! Trace sealing — canonical signing-bytes construction for a sealed
-//! [`CompleteTrace`] (CIRISLensCore#11 Cut 3).
+//! [`CompleteTrace`] (CIRISLensCore#11 Cut 3, updated CIRISLensCore#43.2).
 //!
 //! # The signature-critical contract
 //!
@@ -11,14 +11,31 @@
 //! byte-identical** to what every federation verifier recomputes, or
 //! the signature fails to verify. This module owns the canonical-
 //! envelope *structure*; the byte serialization is delegated to
-//! persist's `canonicalize_envelope_for_signing` — which canonicalizes
-//! the trace-signing path with `PythonJsonDumpsCanonicalizer`
-//! (`json.dumps(sort_keys=True, separators=(",",":"))`), byte-identical
-//! to CIRISAgent's `_build_canonical_message`. (The JCS/RFC-8785
-//! canonicalizer persist gained in v4.6.0 is for the *attestation*
-//! promote path, a different surface; trace signing stays on
-//! json.dumps.) Lens-core never re-implements canonicalization rules
-//! (MISSION.md boundary; the CIRISPersist#7 lesson).
+//! persist's **version-aware dispatch** — `canon_version_for_trace_schema`
+//! + `canonicalizer_for` (CIRISPersist#171 / v4.6.0 / v4.15.0 #871).
+//!
+//! # JCS / 3.0.0 era (CIRISLensCore#43.2)
+//!
+//! `TRACE_SCHEMA_VERSION` is now `"3.0.0"` — the CIRISAgent 2.9.6 JCS
+//! cutover. [`canonical_bytes`] dispatches by the trace's actual
+//! `trace_schema_version` field:
+//!
+//! - `"2.7.x"` (major < 3) → `V1Python` → `PythonJsonDumpsCanonicalizer`
+//!   (`json.dumps(sort_keys=True, separators=(",",":"))`), byte-identical
+//!   to pre-cutover CIRISAgent output. Pre-cut rows in the corpus continue
+//!   to verify under the legacy canonicalizer.
+//! - `"3.0.0"` and later (major ≥ 3) → `V2Jcs` → `JcsCanonicalizer`
+//!   (RFC 8785), the post-cutover canonicalization. **Stamping 3.0.0 and
+//!   sealing with PythonJsonDumps mints signatures the verifier rejects on
+//!   non-ASCII — the CIRISAgent#871 trap.** Both halves of the flip MUST
+//!   land together; this module enforces that by dispatching through the
+//!   same `canon_version_for_trace_schema` gate persist's verifier uses.
+//!
+//! The dispatch mirrors `ciris_persist::verify::ed25519::verify_trace`'s
+//! *canonicalizer selection* exactly (same function, same gate), so
+//! sign and verify are byte-identical by construction. Lens-core never
+//! re-implements canonicalization rules (MISSION.md boundary;
+//! CIRISPersist#7 lesson).
 //!
 //! # The 9(+1)-field canonical (FSD/TRACE_WIRE_FORMAT.md §8, post-
 //! CIRISAgent#710)
@@ -152,18 +169,32 @@ pub fn build_canonical_envelope(trace: &CompleteTrace) -> Value {
 }
 
 /// Canonical signing bytes for a sealed trace: build the envelope, then
-/// delegate to persist's `canonicalize_envelope_for_signing` — the
-/// federation-wide canonicalization authority. Persist canonicalizes the
-/// trace-signing path with `PythonJsonDumpsCanonicalizer`
-/// (`json.dumps(sort_keys=True, separators=(",",":"))`), so these bytes
-/// are byte-identical to what CIRISAgent's `_build_canonical_message`
-/// produces and what every federation verifier recomputes. Lens-core
-/// signs over exactly these bytes; it never re-implements the rules.
-/// The error is stringified (matching `crate::signing::event`'s
-/// handling) to avoid coupling to persist's internal error enum.
+/// dispatch to persist's version-aware canonicalizer — the federation-wide
+/// canonicalization authority.
+///
+/// Dispatches by `trace.trace_schema_version` via the same gate persist's
+/// verifier uses (`canon_version_for_trace_schema` + `canonicalizer_for`),
+/// so sign and verify are byte-identical by construction:
+///
+///   - major < 3 (e.g. `"2.7.9"`) → `V1Python` → `PythonJsonDumpsCanonicalizer`
+///   - major ≥ 3 (e.g. `"3.0.0"`) → `V2Jcs` → `JcsCanonicalizer` (RFC 8785)
+///
+/// **Atomicity note:** stamping `"3.0.0"` and then calling this function seals
+/// with JCS — the two halves of the flip always travel together. Calling with
+/// a trace whose `trace_schema_version` is `"3.0.0"` but the old
+/// `PythonJsonDumpsCanonicalizer` path would mint a signature the verifier
+/// rejects (the CIRISAgent#871 trap); this dispatch prevents that.
+///
+/// The error is stringified to avoid coupling to persist's internal error enum.
 pub fn canonical_bytes(trace: &CompleteTrace) -> Result<Vec<u8>, String> {
+    use ciris_persist::verify::canonical::canonicalizer_for;
+    use ciris_persist::verify::ed25519::canon_version_for_trace_schema;
+
     let envelope = build_canonical_envelope(trace);
-    ciris_persist::prelude::canonicalize_envelope_for_signing(&envelope)
+    let canon_version = canon_version_for_trace_schema(&trace.trace_schema_version);
+    let canonicalizer = canonicalizer_for(canon_version);
+    canonicalizer
+        .canonicalize_value(&envelope)
         .map_err(|e| format!("canonicalize trace: {e}"))
 }
 
@@ -407,10 +438,11 @@ mod tests {
 
     #[test]
     fn canonical_bytes_are_byte_exact_sorted_compact() {
-        // Signature-critical: the bytes persist's canonicalizer produces
-        // (JCS / RFC 8785) MUST equal the agent's
-        // json.dumps(sort_keys=True, separators=(",",":")) for string
-        // data. A minimal fixture lets us assert the exact bytes.
+        // Signature-critical: a 2.7.9-era trace routes through V1Python →
+        // PythonJsonDumpsCanonicalizer (json.dumps sort_keys=True,
+        // separators=(",",":")) — keeping pre-cut 2.7.x corpus rows
+        // verifiable. Explicit "2.7.9" pins the dispatch path so this test
+        // is not affected by the TRACE_SCHEMA_VERSION flip to "3.0.0".
         let t = CompleteTrace {
             trace_id: "tr".into(),
             thought_id: "th".into(),
@@ -430,14 +462,14 @@ mod tests {
             signature: None,
             signature_key_id: None,
             trace_level: Some("GENERIC".into()),
-            trace_schema_version: "2.7.9".into(),
+            trace_schema_version: "2.7.9".into(), // V1Python path — explicit
             deployment_profile: None,
         };
         let bytes = canonical_bytes(&t).expect("canonicalize");
         let got = String::from_utf8(bytes).unwrap();
         // Sorted keys, compact separators. components sorted-keys-per-object.
         // attempt_index 0 is injected inside `data` (agent services.py:1698)
-        // — sorts before "k". This is the agent's signed-canonical shape.
+        // — sorts before "k". This is the 2.7.9 / PythonJsonDumps wire shape.
         let expected = concat!(
             r#"{"agent_id_hash":"ah","completed_at":"2026-06-08T00:00:01Z","#,
             r#""components":[{"agent_id_hash":"ah","component_type":"action","#,
@@ -675,5 +707,112 @@ mod tests {
                  lens: {got}\n  agent: {expected}"
             );
         }
+    }
+
+    // ── CIRISLensCore#43.2: JCS / 3.0.0 dispatch proofs ─────────────────
+
+    /// Dispatch gate: `"2.7.9"` routes to PythonJsonDumps; `"3.0.0"` routes
+    /// to JCS (RFC 8785). For ASCII-only payload the two canonicalizers
+    /// produce identical bytes — divergence only appears on non-ASCII. This
+    /// test asserts the routing itself (not the bytes) by confirming that a
+    /// trace with non-ASCII content produces DIFFERENT bytes under the two
+    /// schema versions, proving the dispatch gate is live.
+    #[test]
+    fn dispatch_routes_v1python_for_279_and_v2jcs_for_300() {
+        // Non-ASCII in a component field triggers the Python-vs-JCS divergence.
+        let mut t279 = CompleteTrace {
+            trace_id: "tr".into(),
+            thought_id: "th".into(),
+            task_id: None,
+            agent_id_hash: "ah".into(),
+            started_at: "2026-06-08T00:00:00Z".into(),
+            completed_at: Some("2026-06-08T00:00:01Z".into()),
+            components: vec![TraceComponent {
+                component_type: ComponentType::Action,
+                event_type: ReasoningEventType::ActionResult,
+                timestamp: "2026-06-08T00:00:01Z".into(),
+                attempt_index: 0,
+                // U+00E9 é — ASCII-only agent_id_hash but non-ASCII data
+                // is enough to split Python (\\u00e9 escape) vs JCS (raw UTF-8).
+                data: json!({"note": "caf\u{00e9}"}),
+                agent_id_hash: "ah".into(),
+            }],
+            signature: None,
+            signature_key_id: None,
+            trace_level: Some("GENERIC".into()),
+            trace_schema_version: "2.7.9".into(),
+            deployment_profile: None,
+        };
+        let mut t300 = t279.clone();
+        t300.trace_schema_version = "3.0.0".into();
+
+        let bytes_279 = canonical_bytes(&t279).expect("canonicalize 2.7.9");
+        let bytes_300 = canonical_bytes(&t300).expect("canonicalize 3.0.0");
+
+        let s279 = String::from_utf8(bytes_279).unwrap();
+        let s300 = String::from_utf8(bytes_300).unwrap();
+
+        // Python emits \\u00e9 for é; JCS emits raw UTF-8 é.
+        assert!(
+            s279.contains("\\u00e9"),
+            "2.7.9 path must use Python-compat (\\u00e9 escape), got: {s279}"
+        );
+        assert!(
+            s300.contains('\u{00e9}') && !s300.contains("\\u00e9"),
+            "3.0.0 path must use JCS (raw UTF-8 é, no escape), got: {s300}"
+        );
+        assert_ne!(
+            s279, s300,
+            "V1Python and V2Jcs must produce different bytes on non-ASCII"
+        );
+
+        // Baseline: ASCII-only traces produce IDENTICAL bytes under both paths
+        // (the two canonicalizers agree on pure-ASCII — no false divergence).
+        t279.components[0].data = json!({"note": "ascii only"});
+        t300.components[0].data = json!({"note": "ascii only"});
+        let ascii_279 = canonical_bytes(&t279).expect("ascii 2.7.9");
+        let ascii_300 = canonical_bytes(&t300).expect("ascii 3.0.0");
+        // Only trace_schema_version differs in the output — the data part is identical.
+        let ascii_279_s = String::from_utf8(ascii_279).unwrap();
+        let ascii_300_s = String::from_utf8(ascii_300).unwrap();
+        // Both contain the same data encoding (no divergence on ASCII).
+        assert!(ascii_279_s.contains("\"note\":\"ascii only\""));
+        assert!(ascii_300_s.contains("\"note\":\"ascii only\""));
+    }
+
+    /// 3.0.0 sign→verify round-trip via [`verify_trace_signature`].
+    ///
+    /// A trace stamped `"3.0.0"`, signed via our dispatch-aware `canonical_bytes` +
+    /// Ed25519, must verify under the same path. Proves the lens-core-internal JCS
+    /// sign/verify match.
+    #[test]
+    fn sign_verify_round_trip_300_via_internal_verifier() {
+        use ed25519_dalek::{Signer, SigningKey};
+
+        let sk = SigningKey::from_bytes(&[11u8; 32]);
+        let vk = sk.verifying_key();
+
+        let mut t = sealed_trace(); // TRACE_SCHEMA_VERSION = "3.0.0" after the flip
+        assert_eq!(
+            t.trace_schema_version, "3.0.0",
+            "sealed_trace() must use the 3.0.0 TRACE_SCHEMA_VERSION default"
+        );
+
+        let msg = canonical_bytes(&t).expect("canonicalize 3.0.0");
+        let sig = sk.sign(&msg);
+        apply_signature(&mut t, &sig.to_bytes(), "jcs-test-key");
+
+        assert!(
+            verify_trace_signature(&t, &vk),
+            "3.0.0 / JCS signed trace must verify under verify_trace_signature (same dispatch)"
+        );
+
+        // Tamper → must reject.
+        let mut tampered = t.clone();
+        tampered.trace_id = "evil".into();
+        assert!(
+            !verify_trace_signature(&tampered, &vk),
+            "tampered 3.0.0 trace must not verify"
+        );
     }
 }

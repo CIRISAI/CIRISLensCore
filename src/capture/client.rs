@@ -709,14 +709,20 @@ mod tests {
     /// `verify_trace` accepts — the same "no-DB persist round-trip"
     /// proof as `batch::tests::batch_parses_and_verifies_through_real_persist`.
     ///
+    /// Since `TRACE_SCHEMA_VERSION` is now `"3.0.0"`, `canonical_bytes` seals
+    /// via JCS (RFC 8785). `verify_trace` receives the caller-supplied
+    /// canonicalizer to canonicalize the value, so we pass `JcsCanonicalizer`
+    /// to match the signing path — preserving sign/verify byte-identity.
+    ///
     /// Uses `LocalSigner::from_parts` (no I/O, deterministic) and drives
     /// `seal_sign_wrap` through the `LocalSigner` path via `sign_trace`
     /// (not the `HardwareSigner` async path — that path is tested by
     /// `sign_trace_via_hardware_signer_applies_sig_key_id` below).
     #[test]
     fn seal_sign_wrap_produces_parseable_verifiable_batch() {
-        use ciris_persist::prelude::{LocalSigner, PythonJsonDumpsCanonicalizer};
+        use ciris_persist::prelude::LocalSigner;
         use ciris_persist::schema::{BatchEnvelope, BatchEvent};
+        use ciris_persist::verify::canonical::JcsCanonicalizer;
         use ciris_persist::verify::verify_trace;
         use ed25519_dalek::SigningKey;
 
@@ -740,8 +746,11 @@ mod tests {
         assert_eq!(env.events.len(), 1);
 
         let BatchEvent::CompleteTrace { trace: ptrace, .. } = &env.events[0];
-        verify_trace(ptrace, &PythonJsonDumpsCanonicalizer, &vk)
-            .expect("persist verify_trace must accept a client-sealed trace");
+        // TRACE_SCHEMA_VERSION = "3.0.0" → JCS canonicalization. verify_trace
+        // uses the caller-supplied canonicalizer to serialize the canonical
+        // value, so we pass JcsCanonicalizer to match the signing path.
+        verify_trace(ptrace, &JcsCanonicalizer, &vk)
+            .expect("persist verify_trace must accept a 3.0.0 JCS-sealed client trace");
     }
 
     /// `seal_sign_wrap` stamps a missing `deployment_profile` from the
@@ -769,7 +778,9 @@ mod tests {
             super::build_batch_bytes(std::slice::from_ref(&trace), &provenance()).expect("batch");
         let env = BatchEnvelope::from_json(&bytes).expect("parse");
         let BatchEvent::CompleteTrace { trace: ptrace, .. } = &env.events[0];
-        // deployment_profile must survive the round-trip (2.7.9 required).
+        // deployment_profile must survive the round-trip when stamped.
+        // (Required at 2.7.9; optional at 3.0.0 — but when stamped, it
+        // must appear in the wire and deserialize cleanly.)
         assert!(
             ptrace.deployment_profile.is_some(),
             "deployment_profile must be present after stamping"

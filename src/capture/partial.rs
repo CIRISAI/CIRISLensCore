@@ -36,9 +36,14 @@ use serde_json::{json, Map, Value};
 
 use super::event::{ComponentType, ReasoningEventType};
 
-/// The wire trace-schema version this assembler emits. The 2.7.9 line
-/// requires the [`CompleteTrace::deployment_profile`] cohort block.
-pub const TRACE_SCHEMA_VERSION: &str = "2.7.9";
+/// The wire trace-schema version this assembler emits. 3.0.0 is the JCS
+/// canonicalizer era (major ≥ 3 ⇒ RFC 8785; CIRISAgent 2.9.6 cutover).
+/// Like 2.7.9, the 10-field canonical layout (9 envelope fields +
+/// `deployment_profile`) is unchanged — only the canonicalizer flips.
+/// [`CompleteTrace::deployment_profile`] remains part of the signed bytes
+/// when present; `BatchEnvelope::from_json` does NOT require it at 3.0.0
+/// (the strict-require gate is 2.7.9-only in persist v5.2.0).
+pub const TRACE_SCHEMA_VERSION: &str = "3.0.0";
 
 /// A single assembled component of a reasoning trace.
 #[derive(Debug, Clone, PartialEq)]
