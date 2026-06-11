@@ -185,6 +185,45 @@ pub enum CaptureEventOutcome {
     ConsentBlocked { reason: &'static str },
 }
 
+// ── PrepareSealOutcome ───────────────────────────────────────────────
+
+/// Result of [`CaptureClient::prepare_for_seal`] — either the event was
+/// handled without reaching the seal step (Opened / Appended / Rejected /
+/// ConsentBlocked), or the trace is ready for sign + persist.
+///
+/// This type exists so the Python-engine path in `ffi::pyo3` can reuse
+/// the same partial-trace assembly, consent, and provenance steps as the
+/// Rust `capture_event` path, with sign + persist as the only divergent
+/// steps (Rust vs Python calls). DRY factor: neither path duplicates
+/// canonicalization or consent logic.
+#[derive(Debug)]
+pub enum PrepareSealOutcome {
+    /// Not a sealing event (or consent blocked). Return this directly to
+    /// the caller; no sign + persist step is needed.
+    NotSealing(CaptureEventOutcome),
+    /// The trace is sealed and ready for sign + persist.
+    ///
+    /// The caller (Rust or Python) must:
+    /// 1. Stamp `deployment_profile` (already carried here from
+    ///    `CaptureClient::deployment_profile`).
+    /// 2. Stamp `trace_level` from `provenance` if absent on the trace.
+    /// 3. Obtain canonical bytes via `seal::canonical_bytes(&trace)`.
+    /// 4. Sign the bytes and call `seal::apply_signature(&mut trace, sig, key_id)`.
+    /// 5. Call `build_batch_bytes(&[trace], &provenance)`.
+    /// 6. Persist the bytes; call `tee_write_if_configured` for the local tee.
+    ReadyToSeal {
+        /// The sealed `CompleteTrace` — stamp, sign, and batch. Boxed to
+        /// reduce the enum's stack size (CompleteTrace is large).
+        trace: Box<CompleteTrace>,
+        /// Batch-level provenance including consent_timestamp, batch_timestamp,
+        /// trace_level, trace_schema_version, and correlation_metadata.
+        provenance: BatchProvenance,
+        /// Operator deployment profile from `CaptureClient::deployment_profile`
+        /// (stamp onto `trace.deployment_profile` if it is `None`).
+        deployment_profile: Option<serde_json::Value>,
+    },
+}
+
 // ── sign_trace_via_hardware_signer ───────────────────────────────────
 
 /// Sign a sealed trace via the `HardwareSigner` abstraction — the
@@ -420,48 +459,53 @@ impl CaptureClient {
         }
     }
 
-    /// Feed one inbound event into the capture pipeline.
+    /// Partial-trace assembly + consent resolution + provenance building,
+    /// **without** sign or persist.
     ///
-    /// - `Opened` / `Appended` — stored in memory, nothing persisted yet.
-    /// - `Rejected { raw }` — unknown event type; typed rejection, never
-    ///   silent. The caller should log `raw` for diagnostics.
-    /// - `SealedAndPersisted` — `ACTION_RESULT` landed: the sealed trace
-    ///   was signed, batched, and handed to
-    ///   `Engine::receive_and_persist`. On success, carries `trace_id`
-    ///   and the persist ingest [`SealSummary`].
-    /// - `ConsentBlocked { reason }` — consent was not granted at seal
-    ///   time; the trace was dropped (CIRISLensCore#34). `reason` is one
-    ///   of `"withdrawn"` or `"no_consent"`.
+    /// This is the shared DRY layer for both the Rust `capture_event` path
+    /// (which then calls `seal_sign_wrap` + `Engine::receive_and_persist`)
+    /// and the Python-engine path in `ffi::pyo3` (which then calls
+    /// `engine.local_key_id/local_sign/receive_and_persist` via Python
+    /// method calls). Neither path re-implements consent or provenance
+    /// logic.
+    ///
+    /// Returns `PrepareSealOutcome::NotSealing` for Opened / Appended /
+    /// Rejected / ConsentBlocked events, or `PrepareSealOutcome::ReadyToSeal`
+    /// when the caller must proceed to sign + persist.
     ///
     /// # Locking discipline
     ///
     /// The `Mutex<PartialTraceStore>` guard is acquired, the store is
-    /// polled (a sync, in-memory operation), and the guard is dropped
-    /// **before** any `.await`. Sign + persist run with the lock
-    /// released.
-    pub async fn capture_event(
+    /// polled (sync, in-memory), and the guard is dropped **before** any
+    /// `.await`. Consent resolution (async) runs with the lock released.
+    pub async fn prepare_for_seal(
         &self,
         event: InboundEvent,
-    ) -> Result<CaptureEventOutcome, ClientError> {
-        // Derive a `trace_id` for new traces: use `thought_id` as the
-        // canonical id (stable, matches the agent's legacy convention)
-        // until Cut 4 introduces a UUID-based policy.
+    ) -> Result<PrepareSealOutcome, ClientError> {
         let trace_id_for_new = event.thought_id.clone();
 
         // Lock, poll, drop — no await crosses this critical section.
         let sealed_trace: Option<Box<CompleteTrace>> = {
             let mut store = self.store.lock().unwrap_or_else(|p| p.into_inner());
             match store.capture(event, &trace_id_for_new) {
-                CaptureOutcome::Opened => return Ok(CaptureEventOutcome::Opened),
-                CaptureOutcome::Appended => return Ok(CaptureEventOutcome::Appended),
+                CaptureOutcome::Opened => {
+                    return Ok(PrepareSealOutcome::NotSealing(CaptureEventOutcome::Opened))
+                }
+                CaptureOutcome::Appended => {
+                    return Ok(PrepareSealOutcome::NotSealing(
+                        CaptureEventOutcome::Appended,
+                    ))
+                }
                 CaptureOutcome::UnknownEvent { raw } => {
-                    return Ok(CaptureEventOutcome::Rejected { raw })
+                    return Ok(PrepareSealOutcome::NotSealing(
+                        CaptureEventOutcome::Rejected { raw },
+                    ))
                 }
                 CaptureOutcome::Sealed(trace) => Some(trace),
             }
         }; // MutexGuard dropped here — safe to .await below.
 
-        let mut trace = *sealed_trace.expect("always Some on Sealed branch");
+        let trace: Box<CompleteTrace> = sealed_trace.expect("always Some on Sealed branch");
         let trace_id = trace.trace_id.clone();
 
         // ── Gap 2: consent gating (privacy-critical) ──────────────────
@@ -469,52 +513,50 @@ impl CaptureClient {
         // Resolve consent at seal time — every seal checks the gate so a
         // recant arriving between two seals is enforced immediately
         // (CIRISLensCore#34 recant-stops-emission).
+        //
+        // NOTE: the Python-engine cohabitation path uses the config-only
+        // consent path (CEG engine-read needs a cross-wheel federation_directory
+        // which is not available when the Engine is a Python object). The
+        // consent_attesting_key_id field has no effect when the Engine is a
+        // Python object — document as a follow-up tied to CIRISEdge#85.
         let consent_resolution = if let Some(ref key_id) = self.consent_attesting_key_id {
-            // CEG path: read the Engine's federation directory.
             super::consent::resolve_consent_via_engine(&self.engine, key_id, &self.consent_config)
                 .await?
         } else {
-            // Config-only path (2.9.6 interim — no canonical community key
-            // yet, so no CEG object). Resolve purely from config; skip the
-            // engine read to avoid a wasted directory query per seal.
             super::consent::resolve_consent(
                 super::consent::GrantState::Absent,
                 &self.consent_config,
             )
         };
 
-        // Extract the consent_timestamp or block emission.
         let consent_timestamp: String = match consent_resolution {
             ConsentResolution::CegGrant { asserted_at } => asserted_at.to_rfc3339(),
             ConsentResolution::ConfigFallback { consent_timestamp } => consent_timestamp,
             ConsentResolution::Withdrawn { .. } => {
-                // Recant/withdrawal — MUST NOT persist or tee. Drop and return.
                 tracing::debug!(
                     trace_id = %trace_id,
                     "consent withdrawn — trace dropped (CIRISLensCore#34)",
                 );
-                return Ok(CaptureEventOutcome::ConsentBlocked {
-                    reason: "withdrawn",
-                });
+                return Ok(PrepareSealOutcome::NotSealing(
+                    CaptureEventOutcome::ConsentBlocked {
+                        reason: "withdrawn",
+                    },
+                ));
             }
             ConsentResolution::NoConsent => {
                 tracing::debug!(
                     trace_id = %trace_id,
                     "no consent configured — trace dropped",
                 );
-                return Ok(CaptureEventOutcome::ConsentBlocked {
-                    reason: "no_consent",
-                });
+                return Ok(PrepareSealOutcome::NotSealing(
+                    CaptureEventOutcome::ConsentBlocked {
+                        reason: "no_consent",
+                    },
+                ));
             }
         };
 
         // ── Gap 5a: per-seal batch_timestamp ──────────────────────────
-        //
-        // Assemble a fresh BatchProvenance at seal time so each sealed
-        // trace carries the wall-clock instant it was emitted, not the
-        // handle-construction instant. Wall-clock is allowed here —
-        // client.rs is the Engine-coupled I/O layer (same as
-        // orphan_sweep's `now` justification).
         let batch_timestamp = Utc::now().to_rfc3339();
 
         // ── Gap 1-wiring: correlation_metadata ────────────────────────
@@ -532,20 +574,24 @@ impl CaptureClient {
             correlation_metadata,
         };
 
-        // Sign + wrap (async, lock released).
-        let bytes = seal_sign_wrap(
-            self.engine.signer().as_ref(),
-            &mut trace,
-            &provenance,
-            self.deployment_profile.as_ref(),
-        )
-        .await?;
+        Ok(PrepareSealOutcome::ReadyToSeal {
+            trace,
+            provenance,
+            deployment_profile: self.deployment_profile.clone(),
+        })
+    }
 
-        // ── Gap 4: local-copy tee (best-effort, never fails persist) ──
+    /// Write batch bytes to the local-copy tee directory (best-effort;
+    /// a write failure is logged but does not propagate).
+    ///
+    /// Shared by the Rust and Python-engine `capture_event` paths so
+    /// neither duplicates the tee logic. The seq counter is advanced
+    /// atomically by this method.
+    pub fn tee_write_if_configured(&self, trace_id: &str, bytes: &[u8]) {
         if let Some(ref dir) = self.local_copy_dir {
             let seq = self.tee_seq.fetch_add(1, Ordering::Relaxed);
             let path = dir.join(format!("lens-batch-{seq:08}.json"));
-            if let Err(e) = std::fs::write(&path, &bytes) {
+            if let Err(e) = std::fs::write(&path, bytes) {
                 tracing::warn!(
                     trace_id = %trace_id,
                     seq = seq,
@@ -554,33 +600,78 @@ impl CaptureClient {
                 );
             }
         }
+    }
 
-        // Persist locally.
-        let batch_summary = self
-            .engine
-            .receive_and_persist(&bytes, self.scrubber.as_ref())
-            .await
-            .map_err(|e| ClientError::Persist(e.to_string()))?;
+    /// Feed one inbound event into the capture pipeline.
+    ///
+    /// - `Opened` / `Appended` — stored in memory, nothing persisted yet.
+    /// - `Rejected { raw }` — unknown event type; typed rejection, never
+    ///   silent. The caller should log `raw` for diagnostics.
+    /// - `SealedAndPersisted` — `ACTION_RESULT` landed: the sealed trace
+    ///   was signed, batched, and handed to
+    ///   `Engine::receive_and_persist`. On success, carries `trace_id`
+    ///   and the persist ingest [`SealSummary`].
+    /// - `ConsentBlocked { reason }` — consent was not granted at seal
+    ///   time; the trace was dropped (CIRISLensCore#34). `reason` is one
+    ///   of `"withdrawn"` or `"no_consent"`.
+    ///
+    /// # Locking discipline
+    ///
+    /// Delegates to [`prepare_for_seal`](Self::prepare_for_seal) which
+    /// drops the `Mutex<PartialTraceStore>` guard before any `.await`.
+    pub async fn capture_event(
+        &self,
+        event: InboundEvent,
+    ) -> Result<CaptureEventOutcome, ClientError> {
+        match self.prepare_for_seal(event).await? {
+            PrepareSealOutcome::NotSealing(outcome) => Ok(outcome),
+            PrepareSealOutcome::ReadyToSeal {
+                mut trace,
+                provenance,
+                deployment_profile,
+            } => {
+                let trace_id = trace.trace_id.clone();
 
-        tracing::debug!(
-            trace_id = %trace_id,
-            trace_events = batch_summary.trace_events_inserted,
-            signatures_verified = batch_summary.signatures_verified,
-            "client sealed and persisted trace",
-        );
+                // Sign + wrap (async, lock released).
+                let bytes = seal_sign_wrap(
+                    self.engine.signer().as_ref(),
+                    &mut trace,
+                    &provenance,
+                    deployment_profile.as_ref(),
+                )
+                .await?;
 
-        // Fan-out to upstreams: deferred to #11 Cut 4. `Engine` v4.13
-        // has no `send_durable` method; that surface is on
-        // `ciris_edge::Edge`. The field is reserved; dispatch lands
-        // when the Cut 4 PR introduces the `Edge` handle.
+                // ── Gap 4: local-copy tee (best-effort, never fails persist) ──
+                self.tee_write_if_configured(&trace_id, &bytes);
 
-        Ok(CaptureEventOutcome::SealedAndPersisted {
-            trace_id,
-            summary: SealSummary {
-                trace_events_inserted: batch_summary.trace_events_inserted,
-                signatures_verified: batch_summary.signatures_verified,
-            },
-        })
+                // Persist locally.
+                let batch_summary = self
+                    .engine
+                    .receive_and_persist(&bytes, self.scrubber.as_ref())
+                    .await
+                    .map_err(|e| ClientError::Persist(e.to_string()))?;
+
+                tracing::debug!(
+                    trace_id = %trace_id,
+                    trace_events = batch_summary.trace_events_inserted,
+                    signatures_verified = batch_summary.signatures_verified,
+                    "client sealed and persisted trace",
+                );
+
+                // Fan-out to upstreams: deferred to #11 Cut 4. `Engine` v4.13
+                // has no `send_durable` method; that surface is on
+                // `ciris_edge::Edge`. The field is reserved; dispatch lands
+                // when the Cut 4 PR introduces the `Edge` handle.
+
+                Ok(CaptureEventOutcome::SealedAndPersisted {
+                    trace_id,
+                    summary: SealSummary {
+                        trace_events_inserted: batch_summary.trace_events_inserted,
+                        signatures_verified: batch_summary.signatures_verified,
+                    },
+                })
+            }
+        }
     }
 
     /// Sweep orphaned (never-sealed) in-flight traces older than

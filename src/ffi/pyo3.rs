@@ -51,6 +51,7 @@ use crate::capture::client::{CaptureClient, CaptureEventOutcome};
 use crate::capture::consent::ConsentConfig;
 use crate::capture::correlation::CorrelationMetadata;
 use crate::capture::partial::InboundEvent;
+use crate::capture::py_engine::{NonSealingKind, PyEngineCapture, PyPrepareOutcome};
 use crate::cohort;
 use crate::detector::{detect, DetectionResult};
 use crate::pipeline::lifecycle::LENS_CORE_VERSION;
@@ -451,10 +452,38 @@ fn install_relay(edge: PyRef<'_, ciris_edge::ffi::pyo3::PyEdge>) -> PyResult<()>
 
 // ─── LensClient (#11 Cut 5) ───────────────────────────────────────
 
+/// Internal representation for `LensClient` — either the sovereign (rlib)
+/// path using `Arc<CaptureClient>` + the per-wheel runtime, or the
+/// cohabitation path using `PyEngineCapture` + the host `PyEngine` object.
+enum LensClientInner {
+    /// Single-wheel / sovereign path.
+    ///
+    /// `CaptureClient::capture_event` handles the full sign+persist flow via
+    /// `Arc<Engine>`. `current_rust_engine()` and `current_runtime_handle()`
+    /// are the per-wheel statics populated when lens-core IS the host wheel.
+    Sovereign(Arc<CaptureClient>),
+
+    /// Pip cohabitation path (CIRISLensCore#43.1 P0 fix).
+    ///
+    /// `PyEngineCapture` handles partial-trace assembly + consent + provenance
+    /// (no `Arc<Engine>`). Sign+persist are driven via Python method calls on
+    /// the host `ciris_persist.Engine` Python object.
+    ///
+    /// `py_engine_rt` is a private tokio `Runtime` — both `current_rust_engine()`
+    /// and `current_runtime_handle()` are per-wheel statics that are empty in
+    /// the cohabitation scenario (same root cause as the P0 bug).
+    Cohabitation {
+        capture: Arc<PyEngineCapture>,
+        py_engine: Py<PyAny>,
+    },
+}
+
 /// Client-mode Python handle: assembles component events from the agent's
 /// `reasoning_event_stream` into sealed, signed, persisted traces.
 ///
 /// # Constructing a `LensClient`
+///
+/// ## Single-wheel (sovereign) path — `engine=None` (default)
 ///
 /// The host must have already constructed a `ciris_persist.Engine` (the
 /// process singleton). `LensClient.__init__` fetches it via
@@ -462,80 +491,97 @@ fn install_relay(edge: PyRef<'_, ciris_edge::ffi::pyo3::PyEdge>) -> PyResult<()>
 /// `install_relay` uses; there is no second Engine.
 ///
 /// ```python
-/// import ciris_persist
 /// import ciris_lens_core
 ///
-/// engine = ciris_persist.Engine(...)   # host constructs, keys + DB
+/// # host already called ciris_persist.Engine(...) earlier
 /// lens = ciris_lens_core.LensClient(
 ///     consent_timestamp="2026-01-01T00:00:00+00:00",
 ///     trace_level="detailed",
-///     trace_schema_version="2.7.9",      # optional; default is "2.7.9"
-///     deployment_profile={               # required at 2.7.9
-///         "agent_role": "ally",
-///         "agent_template": "ally-default",
-///         "deployment_domain": "general",
-///         "deployment_type": "production",
-///         "deployment_region": None,
-///         "deployment_trust_mode": "sovereign",
-///     },
-///     # Optional consent / correlation / tee kwargs:
-///     consent_attesting_key_id=None,     # None = config-only (2.9.6 interim)
-///     local_copy_dir=None,               # path for forensic tee
-///     deployment_region="us-east-1",
-///     deployment_type="production",
-///     agent_role="ally",
-///     agent_template="ally-default",
-///     share_location=False,
-///     user_location=None,
-///     user_timezone=None,
-///     user_latitude=None,
-///     user_longitude=None,
+///     # engine=None (default) — uses the process-singleton rust engine
 /// )
 /// ```
 ///
+/// ## Cohabitation (agent-fold) path — `engine=<host engine>`
+///
+/// When lens-core is installed as a separate wheel alongside
+/// `ciris_persist` (pip cohabitation), the two wheels each statically
+/// link their own copy of ciris_persist. The `OnceLock`-backed
+/// `current_rust_engine()` static in lens-core's bundled copy is
+/// **empty** — even though the host's `ciris_persist.Engine` is running
+/// in the same process. Fetching the engine via that static yields
+/// `RuntimeError: no process Engine`.
+///
+/// The fix: pass the host `ciris_persist.Engine` Python object as
+/// `engine=`. Lens-core drives sign+persist via its **Python methods**
+/// (cross-wheel-safe — they dispatch on the host's `PyEngine` object, not
+/// a per-wheel static):
+///
+/// ```python
+/// import ciris_persist
+/// import ciris_lens_core
+///
+/// engine = ciris_persist.Engine(...)   # host's engine — has keys + DB
+/// lens = ciris_lens_core.LensClient(
+///     consent_timestamp="2026-01-01T00:00:00+00:00",
+///     trace_level="detailed",
+///     engine=engine,                   # cohabitation path (CIRISLensCore#43.1)
+/// )
+/// ```
+///
+/// The cohabitation path calls these engine Python methods:
+/// - `engine.local_key_id()` → str — key ID stamped onto the trace
+/// - `engine.local_sign(canonical_bytes: bytes)` → 64-byte Ed25519 sig
+/// - `engine.receive_and_persist(batch_bytes: bytes, pre_verified=False)` →
+///   `{"envelopes_processed": N, "trace_events_inserted": N, ...,
+///    "signatures_verified": N}` — persists via the host engine's
+///   configured DB and scrubber.
+///
+/// `pre_verified=False` (the default) is used: the host engine holds the
+/// key in its own `federation_keys` table, so `VerifyMode::Full` resolves
+/// it and verifies the trace signature. If you observe `signatures_verified=0`
+/// (key not registered), the signing key ID must be registered in the host
+/// engine's federation directory. Using `pre_verified=True` would skip
+/// verification — don't do that unless you understand the security trade-off.
+///
+/// These are the same Python-method dispatches `process_trace_batch` has
+/// used since v0.1.0 — cross-wheel-safe by design.
+///
+/// ## Consent in the cohabitation path
+///
+/// The cohabitation path uses the **config-fallback consent path** only
+/// (`consent_attesting_key_id` has no effect when `engine=` is provided).
+/// The CEG engine-read path needs a cross-wheel `federation_directory`
+/// accessor not yet available when the Engine is a Python object.
+/// Follow-up: CIRISEdge#85.
+///
 /// # Scrubber policy
 ///
-/// Client mode is the **originating privacy boundary** — unlike relay mode
-/// (which passes `NullScrubber` because scrubbing is the originating
-/// client's egress responsibility per CIRISPersist#89), a production
-/// `LensClient` *should* wire a real PII scrubber.
+/// For the cohabitation path, `receive_and_persist` on the host engine uses
+/// the engine's own configured scrubber — lens-core does not pass a scrubber
+/// separately (CIRISPersist#89: scrubbing is the originating client's egress
+/// responsibility). A configurable-scrubber parameter on `LensClient.__init__`
+/// is a follow-up (CIRISLensCore#11).
 ///
-/// **This constructor uses `NullScrubber` because no zero-argument
-/// "real" scrubber constructor is available in `ciris_persist::scrub`
-/// v4.13. The only configurable scrubber is `CallbackScrubber<F>`, which
-/// requires a host-supplied closure — a configurable-scrubber parameter on
-/// `LensClient.__init__` is a follow-up task (CIRISLensCore#11 note).**
+/// At `generic` trace level this is safe by design (no content text at that
+/// level). At `detailed` or `full_traces` pre-scrub on the agent side before
+/// emitting events.
 ///
-/// PII egress is handled by the correlation fuzz invariant (lat/lng
-/// coarsened to 1-decimal at construction via `CorrelationMetadata::build`)
-/// and shim-side trace-level gating. A configurable scrubber constructor
-/// parameter is a follow-up (CIRISLensCore#11).
+/// # Cross-wheel cohabitation test note
 ///
-/// At `generic` trace level `NullScrubber` is safe by design (no content
-/// text at that level). At `detailed` or `full_traces` you MUST either
-/// (a) pre-scrub on the agent side before emitting events, or (b) wait for
-/// the follow-up configurable-scrubber parameter. A `tracing::warn!` is
-/// emitted at construction when the level is not `generic`.
-///
-/// See also: the relay-no-rescrub boundary (CIRISPersist#89) and
-/// `MEMORY.md → project_relay_no_rescrub.md`.
-///
-/// # `batch_timestamp` policy
-///
-/// `CaptureClient` now assembles a fresh `BatchProvenance` per seal at
-/// `capture_event` time — each `ACTION_RESULT` gets its own wall-clock
-/// `batch_timestamp` (Gap 5a). The `consent_timestamp` is resolved from
-/// the CEG object (when `consent_attesting_key_id` is provided) or from
-/// `consent_timestamp` config at each seal time, not stored statically
-/// on the handle.
+/// The cross-wheel scenario (lens-core wheel + ciris_persist wheel
+/// cohabiting in the same process) cannot be tested in-repo — it requires
+/// two separately-built wheels. This is a CIRISConformance `requires_lens`
+/// cohabitation cell (not faked here). The Rust side of the cohabitation path
+/// (`PyEngineCapture::prepare` → `canonical_bytes_for` → `apply_signature_and_batch`)
+/// IS tested in `src/capture/py_engine.rs` via `py_engine_path_bytes_round_trip_through_persist`.
 #[pyclass(name = "LensClient")]
 struct PyLensClient {
-    inner: Arc<CaptureClient>,
+    inner: LensClientInner,
 }
 
 #[pymethods]
 impl PyLensClient {
-    /// Construct a `LensClient` bound to the process-singleton Engine.
+    /// Construct a `LensClient`.
     ///
     /// # Required parameters
     ///
@@ -548,32 +594,35 @@ impl PyLensClient {
     ///
     /// # Optional keyword arguments
     ///
+    /// - `engine` — the host `ciris_persist.Engine` Python object
+    ///   (**cohabitation path**, CIRISLensCore#43.1 P0 fix). When provided,
+    ///   sign+persist are driven via its Python methods — cross-wheel-safe.
+    ///   Pass `None` (default) for the single-wheel / sovereign path.
     /// - `trace_schema_version` — wire schema version string (default `"2.7.9"`).
     /// - `deployment_profile` — operator 6-field cohort dict; required on the
     ///   wire at schema 2.7.9. Pass `None` only for non-production / dev.
     /// - `consent_attesting_key_id` — key ID for CEG-based consent resolution.
-    ///   `None` → config-only path (2.9.6 interim, no engine read per seal).
-    /// - `local_copy_dir` — filesystem path for best-effort tee output (forensic
-    ///   mirror). Mirrors `CIRIS_ACCORD_METRICS_LOCAL_COPY_DIR`. `None` = off.
+    ///   `None` → config-only path (2.9.6 interim). Has no effect when
+    ///   `engine=` is provided (follow-up: CIRISEdge#85).
+    /// - `local_copy_dir` — filesystem path for best-effort tee output.
+    ///   `None` = off.
     /// - `deployment_region`, `deployment_type`, `agent_role`, `agent_template`
-    ///   — correlation metadata fields (non-PII; populated regardless of
-    ///   `share_location`).
+    ///   — correlation metadata fields.
     /// - `share_location` — consent gate for user PII fields (default `False`).
-    /// - `user_location`, `user_timezone` — PII location fields, emitted only
-    ///   when `share_location = True`.
+    /// - `user_location`, `user_timezone` — PII location fields.
     /// - `user_latitude`, `user_longitude` — raw lat/lng floats; fuzzed to
-    ///   1-decimal region resolution by `CorrelationMetadata::build` before
-    ///   storage (CIRISAgent#757 / CIRISLensCore#11 invariant).
+    ///   1-decimal region resolution.
     ///
     /// # Errors
     ///
-    /// - `RuntimeError` if the process `ciris_persist.Engine` has not been
-    ///   constructed yet.
+    /// - `RuntimeError` if `engine=None` and the process `ciris_persist.Engine`
+    ///   has not been constructed yet (single-wheel path only).
     /// - `ValueError` if `trace_level` is not one of the three valid strings.
     #[new]
     #[pyo3(signature = (
         consent_timestamp,
         trace_level,
+        engine = None,
         trace_schema_version = "2.7.9".to_string(),
         deployment_profile = None,
         consent_attesting_key_id = None,
@@ -590,8 +639,10 @@ impl PyLensClient {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn new(
+        py: Python<'_>,
         consent_timestamp: Option<String>,
         trace_level: String,
+        engine: Option<&Bound<'_, PyAny>>,
         trace_schema_version: String,
         deployment_profile: Option<&Bound<'_, PyAny>>,
         consent_attesting_key_id: Option<String>,
@@ -610,19 +661,10 @@ impl PyLensClient {
         // at first capture_event.
         parse_level(&trace_level)?;
 
-        // Fetch the process-singleton Engine — same route as install_relay.
-        let engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "no process Engine — host must construct ciris_persist.Engine first",
-            )
-        })?;
-
         // Parse deployment_profile: None or a Python dict/object → serde_json::Value.
-        // Use Python's json.dumps for a correct, portable conversion.
         let dp: Option<Value> = match deployment_profile {
             None => None,
             Some(obj) => {
-                let py = obj.py();
                 let json_mod = py.import("json")?;
                 let json_str: String = json_mod.call_method1("dumps", (obj,))?.extract()?;
                 let v: Value = serde_json::from_str(&json_str).map_err(|e| {
@@ -634,15 +676,6 @@ impl PyLensClient {
             }
         };
 
-        // Scrubber decision: use NullScrubber.
-        //
-        // PII egress is handled by the correlation fuzz invariant
-        // (CorrelationMetadata::build coarsens lat/lng to 1-decimal) and
-        // shim-side trace-level gating. ciris_persist v4.13's only zero-arg
-        // scrubber is NullScrubber; CallbackScrubber<F> requires a
-        // host-supplied closure. A configurable-scrubber constructor parameter
-        // is a follow-up (CIRISLensCore#11). Until then, pre-scrub on the agent
-        // side before emitting events at detailed/full_traces levels.
         if trace_level != "generic" {
             tracing::warn!(
                 trace_level = %trace_level,
@@ -652,11 +685,8 @@ impl PyLensClient {
                  + shim-side trace-level gating. See CIRISPersist#89 relay-no-rescrub boundary.",
             );
         }
-        let scrubber = Arc::new(NullScrubber);
 
-        // Build CorrelationMetadata from kwargs (Gap 1-wiring).
-        // CorrelationMetadata::build fuzzes lat/lng internally — raw floats
-        // are never stored on the struct (CIRISAgent#757 invariant).
+        // Build CorrelationMetadata from kwargs.
         let correlation = {
             let cm = CorrelationMetadata::build(
                 deployment_region.as_deref().unwrap_or(""),
@@ -676,14 +706,51 @@ impl PyLensClient {
             }
         };
 
-        // Build ConsentConfig from the consent_timestamp kwarg (Gap 2).
         let consent_config = ConsentConfig { consent_timestamp };
+        let local_copy_dir_path = local_copy_dir.map(std::path::PathBuf::from);
 
-        // local_copy_dir: convert Option<String> → Option<PathBuf>.
-        let local_copy_dir = local_copy_dir.map(std::path::PathBuf::from);
+        // ── Cohabitation path (engine= provided) ─────────────────────
+        //
+        // When the host passes its `ciris_persist.Engine` Python object,
+        // we use `PyEngineCapture` for the store/consent/provenance step
+        // (no Arc<Engine> needed) and route sign+persist through Python
+        // method calls on the host engine object.
+        //
+        // Neither `current_rust_engine()` nor `current_runtime_handle()`
+        // is accessed — both are per-wheel statics that are empty in the
+        // cohabitation scenario (CIRISLensCore#43.1 root cause).
+        if let Some(host_engine) = engine {
+            let capture = PyEngineCapture::new(
+                consent_config,
+                correlation,
+                dp,
+                trace_level.clone(),
+                trace_schema_version.clone(),
+                local_copy_dir_path,
+            );
+            return Ok(Self {
+                inner: LensClientInner::Cohabitation {
+                    capture: Arc::new(capture),
+                    py_engine: host_engine.clone().unbind(),
+                },
+            });
+        }
 
+        // ── Sovereign / single-wheel path (engine=None) ───────────────
+        //
+        // Fetch the process-singleton Engine via the per-wheel Rust static
+        // (same route as install_relay). This path is used when lens-core IS
+        // the host wheel (single compiled unit) — the static is populated.
+        let scrubber = Arc::new(NullScrubber);
+        let rust_engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "no process Engine — host must construct ciris_persist.Engine first. \
+                 For pip cohabitation (two-wheel deployment) pass engine=<host_engine> \
+                 to LensClient to fix CIRISLensCore#43.1.",
+            )
+        })?;
         let client = CaptureClient::new(
-            engine,
+            rust_engine,
             scrubber,
             trace_level.clone(),
             trace_schema_version.clone(),
@@ -691,10 +758,10 @@ impl PyLensClient {
             consent_attesting_key_id,
             consent_config,
             dp,
-            local_copy_dir,
+            local_copy_dir_path,
         );
         Ok(Self {
-            inner: Arc::new(client),
+            inner: LensClientInner::Sovereign(Arc::new(client)),
         })
     }
 
@@ -725,75 +792,234 @@ impl PyLensClient {
     /// - `{"outcome": "sealed_and_persisted", "trace_id": "...",
     ///   "trace_events_inserted": N, "signatures_verified": N}` —
     ///   `ACTION_RESULT` landed; trace sealed, signed, and persisted.
+    /// - `{"outcome": "consent_blocked", "reason": "withdrawn"|"no_consent"}`
+    ///   — trace dropped by the consent gate.
     ///
     /// # Errors
     ///
     /// - `ValueError` if required fields are missing from `component`.
-    /// - `RuntimeError` if the persist runtime handle is gone or
-    ///   the sign/persist step fails.
+    /// - `RuntimeError` if the persist runtime handle is gone (sovereign path)
+    ///   or the sign/persist step fails (both paths).
     fn capture_event<'py>(
         &self,
         py: Python<'py>,
         component: &Bound<'py, PyDict>,
     ) -> PyResult<Bound<'py, PyDict>> {
-        // Parse InboundEvent from the Python dict.
         let event = dict_to_inbound_event(component)?;
 
-        // Acquire the tokio runtime handle — same pattern as install_relay.
-        let handle = ciris_persist::ffi::pyo3::current_runtime_handle()
-            .ok_or_else(|| PyRuntimeError::new_err("persist runtime handle not available"))?;
+        match &self.inner {
+            // ── Sovereign path — unchanged from original ──────────────
+            LensClientInner::Sovereign(client) => {
+                let handle =
+                    ciris_persist::ffi::pyo3::current_runtime_handle().ok_or_else(|| {
+                        PyRuntimeError::new_err("persist runtime handle not available")
+                    })?;
+                let inner = Arc::clone(client);
+                let outcome = handle
+                    .block_on(inner.capture_event(event))
+                    .map_err(|e| PyRuntimeError::new_err(format!("capture_event: {e}")))?;
+                outcome_to_dict(py, outcome)
+            }
 
-        // `batch_timestamp` is now stamped fresh at each seal inside
-        // CaptureClient::capture_event (Gap 5a — per-seal wall-clock).
-        let inner = Arc::clone(&self.inner);
-        let outcome = handle
-            .block_on(inner.capture_event(event))
-            .map_err(|e| PyRuntimeError::new_err(format!("capture_event: {e}")))?;
+            // ── Cohabitation path (CIRISLensCore#43.1 P0 fix) ────────
+            //
+            // Orchestration:
+            // 1. PyEngineCapture::prepare (Rust) — store, consent, provenance,
+            //    stamp deployment_profile + trace_level. Sync, no tokio needed.
+            // 2. For non-sealing outcomes → return immediately.
+            // 3. For ReadyToSeal:
+            //    a. canonical_bytes_for (Rust — JCS / V2Jcs dispatch)
+            //    b. engine.local_key_id() (Python)
+            //    c. engine.local_sign(canonical_bytes) (Python) → 64-byte sig
+            //    d. PyEngineCapture::apply_signature_and_batch (Rust)
+            //    e. tee_write_if_configured (Rust)
+            //    f. engine.receive_and_persist(batch_bytes) (Python) → summary
+            //    g. Extract trace_events_inserted + signatures_verified from summary
+            LensClientInner::Cohabitation { capture, py_engine } => {
+                let cap = Arc::clone(capture);
+                let engine = py_engine.bind(py);
 
-        let result = PyDict::new(py);
-        match outcome {
-            CaptureEventOutcome::Opened => {
-                result.set_item("outcome", "opened")?;
-            }
-            CaptureEventOutcome::Appended => {
-                result.set_item("outcome", "appended")?;
-            }
-            CaptureEventOutcome::Rejected { raw } => {
-                result.set_item("outcome", "rejected")?;
-                result.set_item("raw", raw)?;
-            }
-            CaptureEventOutcome::SealedAndPersisted { trace_id, summary } => {
-                result.set_item("outcome", "sealed_and_persisted")?;
-                result.set_item("trace_id", trace_id)?;
-                result.set_item("trace_events_inserted", summary.trace_events_inserted)?;
-                result.set_item("signatures_verified", summary.signatures_verified)?;
-            }
-            CaptureEventOutcome::ConsentBlocked { reason } => {
-                // Trace was dropped — consent withdrawn or not configured.
-                // Returns {"outcome":"consent_blocked","reason":"withdrawn"|"no_consent"}.
-                result.set_item("outcome", "consent_blocked")?;
-                result.set_item("reason", reason)?;
+                match cap.prepare(event) {
+                    PyPrepareOutcome::NonSealing(kind) => {
+                        let result = PyDict::new(py);
+                        match kind {
+                            NonSealingKind::Opened => result.set_item("outcome", "opened")?,
+                            NonSealingKind::Appended => result.set_item("outcome", "appended")?,
+                            NonSealingKind::Rejected { raw } => {
+                                result.set_item("outcome", "rejected")?;
+                                result.set_item("raw", raw)?;
+                            }
+                        }
+                        Ok(result)
+                    }
+                    PyPrepareOutcome::ConsentBlocked { reason } => {
+                        let result = PyDict::new(py);
+                        result.set_item("outcome", "consent_blocked")?;
+                        result.set_item("reason", reason)?;
+                        Ok(result)
+                    }
+                    PyPrepareOutcome::ReadyToSeal {
+                        mut trace,
+                        provenance,
+                    } => {
+                        let trace_id = trace.trace_id.clone();
+
+                        // 3a. Canonical bytes (Rust — version-aware dispatch).
+                        let canonical =
+                            PyEngineCapture::canonical_bytes_for(&trace).map_err(|e| {
+                                PyRuntimeError::new_err(format!("canonical_bytes: {e}"))
+                            })?;
+
+                        // 3b. Key ID via Python.
+                        let key_id: String = engine
+                            .call_method0("local_key_id")
+                            .map_err(|e| {
+                                PyRuntimeError::new_err(format!("engine.local_key_id(): {e}"))
+                            })?
+                            .extract()?;
+
+                        // 3c. Sign via Python (returns 64-byte Ed25519 sig).
+                        let canonical_pybytes = PyBytes::new(py, &canonical);
+                        let sig_obj = engine
+                            .call_method1("local_sign", (canonical_pybytes,))
+                            .map_err(|e| {
+                                PyRuntimeError::new_err(format!("engine.local_sign: {e}"))
+                            })?;
+                        let sig: Vec<u8> = sig_obj.cast::<PyBytes>()?.as_bytes().to_vec();
+                        if sig.len() != 64 {
+                            return Err(PyRuntimeError::new_err(format!(
+                                "engine.local_sign returned {} bytes, expected 64",
+                                sig.len()
+                            )));
+                        }
+
+                        // 3d. Apply signature + build batch bytes (Rust).
+                        let batch_bytes = PyEngineCapture::apply_signature_and_batch(
+                            &mut trace,
+                            &sig,
+                            &key_id,
+                            &provenance,
+                        )
+                        .map_err(|e| PyRuntimeError::new_err(format!("build_batch_bytes: {e}")))?;
+
+                        // 3e. Local-copy tee (best-effort, never fails persist).
+                        cap.tee_write_if_configured(&trace_id, &batch_bytes);
+
+                        // 3f. Persist via Python engine.
+                        //
+                        // pre_verified=False: the host engine holds the signing key
+                        // in its own federation_keys table, so VerifyMode::Full
+                        // resolves the key and verifies the trace signature. This is
+                        // the correct default — skipping verification (pre_verified=True)
+                        // is only valid when an Edge verifier has already attested
+                        // the batch (CIRISPersist#91 / AV-9). We use the default here
+                        // because the key IS in the host engine's directory (the engine
+                        // was constructed with it), and we want signatures_verified=1
+                        // in the returned summary as confirmation of correct key setup.
+                        let batch_pybytes = PyBytes::new(py, &batch_bytes);
+                        let summary_obj = engine
+                            .call_method1("receive_and_persist", (batch_pybytes,))
+                            .map_err(|e| {
+                                PyRuntimeError::new_err(format!("engine.receive_and_persist: {e}"))
+                            })?;
+
+                        // 3g. Extract the two fields the outcome dict needs.
+                        // `receive_and_persist` returns a Python dict with keys:
+                        //   envelopes_processed, trace_events_inserted,
+                        //   trace_events_conflicted, trace_llm_calls_inserted,
+                        //   scrubbed_fields, signatures_verified
+                        // (see ciris_persist v5.2.0 pyo3.rs:2617–2626).
+                        let summary_dict = summary_obj.cast::<PyDict>()?;
+                        let trace_events_inserted: usize = summary_dict
+                            .get_item("trace_events_inserted")?
+                            .ok_or_else(|| {
+                                PyRuntimeError::new_err(
+                                    "receive_and_persist summary missing 'trace_events_inserted'",
+                                )
+                            })?
+                            .extract()?;
+                        let signatures_verified: usize = summary_dict
+                            .get_item("signatures_verified")?
+                            .ok_or_else(|| {
+                                PyRuntimeError::new_err(
+                                    "receive_and_persist summary missing 'signatures_verified'",
+                                )
+                            })?
+                            .extract()?;
+
+                        tracing::debug!(
+                            trace_id = %trace_id,
+                            trace_events = trace_events_inserted,
+                            signatures_verified = signatures_verified,
+                            "client (cohabitation) sealed and persisted trace",
+                        );
+
+                        let result = PyDict::new(py);
+                        result.set_item("outcome", "sealed_and_persisted")?;
+                        result.set_item("trace_id", trace_id)?;
+                        result.set_item("trace_events_inserted", trace_events_inserted)?;
+                        result.set_item("signatures_verified", signatures_verified)?;
+                        Ok(result)
+                    }
+                }
             }
         }
-        Ok(result)
     }
 
     /// Purge orphaned (never-sealed) in-flight traces older than
     /// `max_age_secs` seconds.
     ///
-    /// Calls `CaptureClient::orphan_sweep` with `now = Utc::now()` captured
-    /// at the Rust FFI boundary (wall-clock reads are allowed here).
-    ///
     /// Returns the count of traces purged (int).
     #[pyo3(signature = (max_age_secs = 3600))]
     fn orphan_sweep(&self, max_age_secs: u64) -> PyResult<usize> {
-        let handle = ciris_persist::ffi::pyo3::current_runtime_handle()
-            .ok_or_else(|| PyRuntimeError::new_err("persist runtime handle not available"))?;
-        let inner = Arc::clone(&self.inner);
         let now = Utc::now();
-        let count = handle.block_on(inner.orphan_sweep(now, max_age_secs));
-        Ok(count)
+        match &self.inner {
+            LensClientInner::Sovereign(client) => {
+                let handle =
+                    ciris_persist::ffi::pyo3::current_runtime_handle().ok_or_else(|| {
+                        PyRuntimeError::new_err("persist runtime handle not available")
+                    })?;
+                let inner = Arc::clone(client);
+                Ok(handle.block_on(inner.orphan_sweep(now, max_age_secs)))
+            }
+            LensClientInner::Cohabitation { capture, .. } => {
+                // orphan_sweep on PyEngineCapture is sync (in-memory store only).
+                Ok(capture.orphan_sweep(now, max_age_secs))
+            }
+        }
     }
+}
+
+/// Map a `CaptureEventOutcome` to a Python result dict — shared helper
+/// for the sovereign-path `capture_event` to avoid duplication.
+fn outcome_to_dict<'py>(
+    py: Python<'py>,
+    outcome: CaptureEventOutcome,
+) -> PyResult<Bound<'py, PyDict>> {
+    let result = PyDict::new(py);
+    match outcome {
+        CaptureEventOutcome::Opened => {
+            result.set_item("outcome", "opened")?;
+        }
+        CaptureEventOutcome::Appended => {
+            result.set_item("outcome", "appended")?;
+        }
+        CaptureEventOutcome::Rejected { raw } => {
+            result.set_item("outcome", "rejected")?;
+            result.set_item("raw", raw)?;
+        }
+        CaptureEventOutcome::SealedAndPersisted { trace_id, summary } => {
+            result.set_item("outcome", "sealed_and_persisted")?;
+            result.set_item("trace_id", trace_id)?;
+            result.set_item("trace_events_inserted", summary.trace_events_inserted)?;
+            result.set_item("signatures_verified", summary.signatures_verified)?;
+        }
+        CaptureEventOutcome::ConsentBlocked { reason } => {
+            result.set_item("outcome", "consent_blocked")?;
+            result.set_item("reason", reason)?;
+        }
+    }
+    Ok(result)
 }
 
 /// Parse a Python dict into an [`InboundEvent`].
