@@ -1,6 +1,6 @@
 [package]
 name = "ciris-lens-core"
-version = "0.4.8"
+version = "0.4.9"
 edition = "2021"
 description = "Science-layer runtime for the CIRIS federation: cohort-routes, scores manifold conformity, signs detection events"
 license = "AGPL-3.0-or-later"
@@ -25,8 +25,8 @@ crate-type = ["cdylib", "rlib"]
 #
 # OQ-01 closure 2026-05-03: rlib primary, PyO3 cdylib via `python`
 # feature for the deployed-lens cutover.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v5.1.1", version = "5", features = ["extract", "sqlite"] }
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v2.0.0", version = "2", features = ["transport-http"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v5.2.0", version = "5", features = ["extract", "sqlite"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v2.0.1", version = "2", features = ["transport-http"] }
 
 # Keyring — relay mode (CIRISLensCore#10) loads its Edge transport-
 # signing identity via `ciris_keyring::load_local_seed`. Edge's
