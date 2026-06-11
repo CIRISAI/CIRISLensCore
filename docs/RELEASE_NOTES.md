@@ -1,5 +1,155 @@
 # CIRISLensCore Release Notes
 
+# v1.0.0 — wire-contract freeze + CIRISLensCore#11 client-emit surface
+
+**2026-06-11** — The v1.0 milestone. Two things land together:
+the wire-contract freeze (CIRISLensCore#18 — every frozen type
+documented in `docs/PUBLIC_SCHEMA_CONTRACT.md` is now `stable-frozen`)
+and the complete CIRISLensCore#11 client/emit surface — the
+capture → seal → sign → persist pipeline that replaces the emit
+half of CIRISAgent's `accord_metrics/services.py` (~3000 LOC Python).
+This is the PoB §3.1 fold ABI: what the agent links against post-fold.
+
+## Substrate floor
+
+| Crate | v1.0.0 |
+|---|---|
+| `ciris-persist` | **v5.2.0** |
+| `ciris-edge`    | **v2.0.1** |
+| `ciris-verify`  | **v5.1.0** |
+
+## What v1.0.0 ships
+
+### CIRISLensCore#11 client-emit surface (`src/capture/`)
+
+The `src/capture/` module lands in full:
+
+- **`CaptureClient`** (`src/capture/client.rs`) — the rlib
+  orchestrator. 9-argument constructor (`engine`, `scrubber`,
+  `trace_level`, `trace_schema_version`, `correlation`,
+  `consent_attesting_key_id`, `consent_config`, `deployment_profile`,
+  `local_copy_dir`); async `capture_event(InboundEvent) ->
+  Result<CaptureEventOutcome, ClientError>` (the per-thought entry
+  point); async `orphan_sweep(now, max_age_secs) -> usize` (purges
+  stale in-flight traces).
+
+- **`CaptureEventOutcome`** — 5-variant result: `Opened`, `Appended`,
+  `Rejected { raw }`, `SealedAndPersisted { trace_id, summary }`,
+  `ConsentBlocked { reason }` (`"withdrawn"` or `"no_consent"`).
+
+- **`ReasoningEventType`** (`src/capture/event.rs`) — 15-variant
+  closed enum replacing the Python `EVENT_TO_COMPONENT` dict.
+  `as_wire_str()` / `component_type()` / `seals_trace()` / `parse()`
+  are compile-time total mappings; the CIRISAgent#757 /
+  CIRISLens#13 mis-component drift class is structurally prevented.
+
+- **`ComponentType`** — 12-variant bucket enum; 12-entry wire-string
+  table locked by test.
+
+- **`InboundEvent`** / **`PartialTraceStore`** / **`CompleteTrace`**
+  (`src/capture/partial.rs`) — in-memory partial-trace assembly keyed
+  by `thought_id`. `TRACE_SCHEMA_VERSION = "2.7.9"`. `orphan_sweep`
+  is clock-injected (mirrors `plan_eviction` no-wall-clock discipline).
+
+- **Canonical-bytes contract** (`src/capture/seal.rs`) —
+  `build_canonical_envelope` shapes the 9(+1)-field signed envelope;
+  `canonical_bytes` delegates to persist's
+  `PythonJsonDumpsCanonicalizer` — byte-exact to CIRISAgent's
+  `_build_canonical_message`. `strip_empty` recursive stripper (keeps
+  `0` and `false`; drops `null`/`""`/`[]`/`{}`). `apply_signature` /
+  `verify_trace_signature` / `sign_trace` / `sign_trace_via_hardware_signer`.
+  The parity harness (`canonical_bytes_match_agent_fixtures`) locks
+  byte-exactness against agent-generated test fixtures.
+
+- **`build_batch_bytes` / `BatchProvenance` / `BatchBuildError`**
+  (`src/capture/batch.rs`) — wraps signed traces into
+  `BatchEnvelope` wire bytes accepted by `Engine::receive_and_persist`
+  and the edge outbound dispatcher. Round-trip proven by
+  `batch_parses_and_verifies_through_real_persist` (persist's real
+  `BatchEnvelope::from_json` + `verify_trace`, no DB required).
+
+- **`ConsentConfig` / `ConsentResolution` / `resolve_consent` /
+  `resolve_consent_via_engine` / `CONSENT_DIMENSION`**
+  (`src/capture/consent.rs`) — dynamic CEG consent gate.
+  `Withdrawn → Withdrawn (never config)` is the privacy-critical
+  invariant (CIRISAgent#870 / CIRISLensCore#34 recant cascade).
+  Config-only path for the 2.9.6 interim (no canonical community key
+  yet). Fails closed: a directory-read error is `Err`, not a silent
+  fallback to config.
+
+- **`CorrelationMetadata` / `fuzz_location_to_region`**
+  (`src/capture/correlation.rs`) — PII-fuzz wire invariant closing
+  CIRISAgent#757. `CorrelationMetadata::build` is the only
+  constructor; raw `Option<f64>` lat/lng are fuzzed to 1-decimal
+  region resolution immediately — un-fuzzed values cannot reach
+  the wire. `fuzz_location_to_region` is byte-exact to the Python
+  `_fuzz_location_to_region`.
+
+- **Local-copy tee** — when `local_copy_dir` is set, each sealed
+  batch is written to `{dir}/lens-batch-{seq:08}.json` as a
+  best-effort forensic mirror (mirrors
+  `CIRIS_ACCORD_METRICS_LOCAL_COPY_DIR`). Tee failures log a warning
+  and never block persist.
+
+### `LensClient` PyO3 pyclass (`src/ffi/pyo3.rs`)
+
+The `LensClient` pyclass exposes the full client-emit surface to the
+Python agent shim. Constructor accepts 15 named kwargs (`consent_timestamp`,
+`trace_level`, and 13 optional kwargs). `capture_event(component: dict)
+-> dict` returns one of five outcome dicts; `orphan_sweep(max_age_secs=3600)
+-> int`. Registered in the `ciris_lens_core` module alongside the
+existing `install_relay` + four drop-in functions.
+
+### Sovereign rlib parity (#17 validated)
+
+The rlib build (`--no-default-features`) compiles the full
+`src/capture/` surface clean. Sovereign operators can link
+`CaptureClient` directly without the Python wheel. The 9-argument
+constructor is the rlib entry point; the Engine-as-parameter pattern
+means no keys or DB configuration live inside the library.
+
+### Wire-contract freeze (CIRISLensCore#18)
+
+The following surfaces are promoted to `stable-frozen` at v1.0.0
+(full detail in `docs/PUBLIC_SCHEMA_CONTRACT.md`):
+
+- `crate::wire::*` (already frozen in v0.x; confirmed frozen)
+- `CaptureClient::{new, capture_event, orphan_sweep}`
+- `CaptureEventOutcome` (all 5 variants + outcome strings)
+- `LensClient` PyO3 (kwarg constructor + methods + result-dict strings)
+- `ReasoningEventType` + `ComponentType` + wire-string mappings
+- `InboundEvent`; `TRACE_SCHEMA_VERSION`; `CONSENT_DIMENSION`
+- `CorrelationMetadata::build` construction invariant (PII-fuzz)
+- `canonical_bytes` / `strip_empty` / `apply_signature` /
+  `verify_trace_signature` (byte-exact-to-agent federation-verify contract)
+- `install_relay` / `attach_handler` (cohabitation entries; already frozen)
+
+Surfaces kept `stable` (NOT frozen — additive evolution expected):
+`EgressFilter` (CIRISLensCore#14), `ScoresOracle`,
+`RetentionPolicy`, `ConsentResolution` engine-read path
+(CIRISAgent#870 CEG sourcing still settling),
+`LensCore::process` internals + detector family (CEG detector issues).
+
+## Cohabitation contract
+
+Exact-pin triple: `ciris-persist==5.2.0`, `ciris-edge==2.0.1`,
+`ciris-verify==5.1.0`. A cohabiting host must construct a persist
+**v5.2.0** Engine + edge **v2.0.1**.
+
+`install_relay`, `LensCore::attach_handler`, `LensCore::relay`,
+`process_trace_batch`, and the v0.1.x drop-in surface are
+**unchanged**. `LensClient` is the addition.
+
+## Upgrade path
+
+`pip install --upgrade ciris-lens-core` — the deployed `ciris_persist`
+wheel must be v5.2.0 and `ciris_edge` v2.0.1 for the shared-engine
+process. For sovereign rlib consumers: `Cargo.toml` tag bump to
+`v1.0.0`; the `CaptureClient::new` 9-argument constructor is the
+new stable entry point for the fold.
+
+---
+
 # v0.4.5 — persist v4.10.0 + edge v1.5.0 + verify v5.0.0
 
 **2026-06-09** — Cascade-catch-up onto the persist v4.10.0 / edge v1.5.0
