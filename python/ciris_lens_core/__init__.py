@@ -100,7 +100,7 @@ from .ciris_lens_core import (  # type: ignore[attr-defined]
     scrub_traces_batch,
 )
 
-__version__ = "0.4.7"
+__version__ = "0.4.9"
 
 __all__ = [
     "PROJECTION_VERSION",
