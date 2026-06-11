@@ -191,7 +191,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatenim/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         continue-on-error: true
       - uses: actions/setup-python@v5
         with:
