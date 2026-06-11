@@ -33,11 +33,13 @@
 pub mod batch;
 pub mod client;
 pub mod consent;
+pub mod correlation;
 pub mod event;
 pub mod partial;
 pub mod seal;
 
 pub use batch::{build_batch_bytes, BatchBuildError, BatchProvenance};
+pub use correlation::{fuzz_location_to_region, CorrelationMetadata};
 pub use client::{
     sign_trace_via_hardware_signer, CaptureClient, CaptureEventOutcome, ClientError, SealSignError,
     SealSummary,
