@@ -39,7 +39,6 @@ pub mod partial;
 pub mod seal;
 
 pub use batch::{build_batch_bytes, BatchBuildError, BatchProvenance};
-pub use correlation::{fuzz_location_to_region, CorrelationMetadata};
 pub use client::{
     sign_trace_via_hardware_signer, CaptureClient, CaptureEventOutcome, ClientError, SealSignError,
     SealSummary,
@@ -48,6 +47,7 @@ pub use consent::{
     resolve_consent, resolve_consent_via_engine, resolve_grant, ConsentConfig, ConsentError,
     ConsentResolution, GrantState, CONSENT_DIMENSION,
 };
+pub use correlation::{fuzz_location_to_region, CorrelationMetadata};
 pub use event::{ComponentType, ReasoningEventType};
 pub use partial::{
     CaptureOutcome, CompleteTrace, InboundEvent, PartialTraceStore, TraceComponent,
