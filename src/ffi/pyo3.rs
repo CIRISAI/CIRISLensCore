@@ -1089,7 +1089,8 @@ fn dict_to_inbound_event(d: &Bound<'_, PyDict>) -> PyResult<InboundEvent> {
 // ─── Module entry ─────────────────────────────────────────────────
 
 /// PyO3 cdylib entry. The original 4 deployed-lens drop-in functions
-/// plus the v0.2 cohabitation bootstrap (`install_relay`).
+/// plus the v0.2 cohabitation bootstrap (`install_relay`) and the
+/// v0.3 audit client (`LensAudit`, CIRISLensCore#12).
 #[pymodule]
 fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_trace_batch, m)?)?;
@@ -1098,6 +1099,8 @@ fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ner_is_configured, m)?)?;
     m.add_function(wrap_pyfunction!(install_relay, m)?)?;
     m.add_class::<PyLensClient>()?;
+    // v0.3: typed audit log client (CIRISLensCore#12).
+    m.add_class::<crate::audit::pyo3::PyLensAudit>()?;
     m.add(
         "PROJECTION_VERSION",
         crate::extract::projection::PROJECTION_VERSION,
