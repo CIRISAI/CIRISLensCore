@@ -1,5 +1,13 @@
 # CIRISLensCore Release Notes
 
+# v1.3.1 — read crc-v2's explicit concern_direction + corridor model (RATCHET#6)
+
+**2026-06-12** — Contract-alignment patch. RATCHET#6 (an explicit per-axis concern-direction field, asked as a crc-v3+ hardening) landed in **crc-v2 itself** — each axis now carries `threshold_function.concern_direction`, and the 4 corridor axes (compute, models, rights_asymmetry, informational_asymmetry) use a new `outside_corridor` direction with a `corridor: {upper_bound, lower_bound}`. lens-core now reads the explicit field instead of inferring from `threshold_pctile_of_observed`.
+
+- `ConcernDirection` gains `OutsideCorridor`; `ThresholdFunction` parses `concern_direction` + `corridor`. `concern_direction()` returns the explicit field when present, with the pctile inference kept as the fallback for pre-#6 bundles.
+- The scorer fires `OutsideCorridor` at `metric >= corridor.upper_bound`; the lower (chaos) pole is inert until crc-v3+ calibrates `lower_bound` (null in crc-v2) — forward-correct when it lands.
+- **No behavioral change at the current calibration**: `upper_bound == threshold_value` for every corridor axis, so firing is identical to 1.3.0. This aligns lens-core to the published contract and future-proofs the chaos pole. `bundle_evidence_ref` reads the bundle hash at runtime (nothing baked), so the patched bundle's sha flows through unchanged. Substrate floor + wire contract unchanged.
+
 # v1.3.0 — crc-v2 axis-family calibration: F-3 + distributive detectors live
 
 **2026-06-12** — Consumes RATCHET's **crc-v2** calibration package (closes RATCHET#2/#3/#5), flipping the F-3 (`correlated_action:*`) and distributive (`distributive:access:*`) detectors from `AxisAwaitingCalibration` scaffolds to live readings. Substrate floor unchanged (persist 5.5.5 / edge 2.2.1 / verify 5.1.3); wire contract unchanged (additive).
