@@ -86,14 +86,43 @@ pub enum Polarity {
 /// `threshold_pctile_of_observed`: an upper-tail (p75) threshold fires
 /// concern at `metric >= threshold`; a lower-tail (p25) threshold fires
 /// concern at `metric <= threshold`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConcernDirection {
     /// Concern when `metric >= threshold` (high concentration /
-    /// asymmetry). compute_gini, models_hhi, nonmember_frac, all F-3.
+    /// asymmetry). federation_membership, participation_exclusion,
+    /// aggregate_footprint.
+    #[serde(rename = "at_or_above")]
     AtOrAbove,
     /// Concern when `metric <= threshold` (low diversity). cap_diversity
     /// only (`README: cap_diversity ≤ 0.037`).
+    #[serde(rename = "at_or_below")]
     AtOrBelow,
+    /// Concern when the metric exits the healthy corridor at EITHER pole
+    /// (compute_gini, models_hhi, rights_asymmetry, info_asym_cv).
+    /// crc-v2 calibrates ONLY the upper bound (== `threshold_value`); the
+    /// lower bound is `structurally_documented_uncalibrated_in_v2`, so
+    /// lower-pole concern is not flagged until crc-v3+ sets
+    /// `corridor.lower_bound`. Framework basis: CCA both-pole fragility
+    /// (rigidity pole ρ→1 + chaos pole ρ→0), per
+    /// `bundle.yaml::consumer_contract.concern_direction_convention`.
+    #[serde(rename = "outside_corridor")]
+    OutsideCorridor,
+}
+
+/// The healthy-coordination corridor for an `outside_corridor` axis.
+/// Mirrors `bundle.yaml::axes.{axis}.threshold_function.corridor`
+/// (status/doc sub-fields are ignored; only the bounds drive logic).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Corridor {
+    /// Upper concern bound — corpus-calibrated in crc-v2 (== the axis
+    /// `threshold_value`). `metric >= upper_bound` ⇒ concern.
+    #[serde(default)]
+    pub upper_bound: Option<f64>,
+    /// Lower concern bound — `null` in crc-v2 (uncalibrated); set in
+    /// crc-v3+ once corpus variance permits. When present,
+    /// `metric <= lower_bound` ⇒ (chaos-pole) concern.
+    #[serde(default)]
+    pub lower_bound: Option<f64>,
 }
 
 /// Calibration-time outcome flag carried on axes whose corpus showed
@@ -141,6 +170,17 @@ pub struct ThresholdFunction {
     /// Present only on zero-variance axes.
     #[serde(default)]
     pub calibration_outcome: Option<CalibrationOutcome>,
+    /// Explicit concern direction (crc-v2 post-RATCHET#6). When present
+    /// it is AUTHORITATIVE — [`ThresholdFunction::concern_direction`]
+    /// returns it directly instead of inferring from the pctile tail.
+    /// Absent on pre-#6 bundles → pctile-inference fallback.
+    #[serde(default, rename = "concern_direction")]
+    pub concern_direction_field: Option<ConcernDirection>,
+    /// The healthy corridor for `outside_corridor` axes. `upper_bound`
+    /// is corpus-calibrated (== `threshold_value`); `lower_bound` is
+    /// null until crc-v3+. Absent on single-pole axes.
+    #[serde(default)]
+    pub corridor: Option<Corridor>,
 }
 
 impl ThresholdFunction {
@@ -153,12 +193,37 @@ impl ThresholdFunction {
     /// `positive_when_distributed` axes (p75, high-is-bad). The
     /// zero-variance sentinel axes are p75 → `AtOrAbove` (any nonzero
     /// deviation crosses).
+    ///
+    /// crc-v2 (post-RATCHET#6) ships an explicit `concern_direction`;
+    /// when present it is authoritative and the pctile heuristic is
+    /// bypassed entirely (it also surfaces `outside_corridor`, which the
+    /// pctile alone cannot express). The inference remains the fallback
+    /// for any bundle that predates the field.
     pub fn concern_direction(&self) -> ConcernDirection {
+        if let Some(dir) = self.concern_direction_field {
+            return dir;
+        }
         if self.threshold_pctile_of_observed <= 0.5 {
             ConcernDirection::AtOrBelow
         } else {
             ConcernDirection::AtOrAbove
         }
+    }
+
+    /// The upper concern bound for an `outside_corridor` axis, falling
+    /// back to `threshold_value` (they are equal in crc-v2). Used by the
+    /// scorer's corridor-exit test.
+    pub fn corridor_upper_bound(&self) -> f64 {
+        self.corridor
+            .as_ref()
+            .and_then(|c| c.upper_bound)
+            .unwrap_or(self.threshold_value)
+    }
+
+    /// The lower concern bound for an `outside_corridor` axis, if
+    /// calibrated (`None` in crc-v2 → lower-pole not flagged).
+    pub fn corridor_lower_bound(&self) -> Option<f64> {
+        self.corridor.as_ref().and_then(|c| c.lower_bound)
     }
 }
 
@@ -359,6 +424,38 @@ mod tests {
         assert_eq!(
             rights.threshold_function.polarity,
             Polarity::NegativeWhenDetected
+        );
+
+        // Explicit concern_direction (crc-v2 post-RATCHET#6) is read
+        // directly, NOT inferred from the pctile. The four corridor axes
+        // surface OutsideCorridor with upper_bound == threshold_value and
+        // an uncalibrated (null) lower_bound; the single-pole axes carry
+        // at_or_above / at_or_below.
+        assert_eq!(
+            compute.threshold_function.concern_direction(),
+            ConcernDirection::OutsideCorridor
+        );
+        assert!(
+            (compute.threshold_function.corridor_upper_bound()
+                - compute.threshold_function.threshold_value)
+                .abs()
+                < 1e-12
+        );
+        assert_eq!(compute.threshold_function.corridor_lower_bound(), None);
+        assert_eq!(
+            rights.threshold_function.concern_direction(),
+            ConcernDirection::OutsideCorridor
+        );
+        assert_eq!(
+            fed.threshold_function.concern_direction(),
+            ConcernDirection::AtOrAbove
+        );
+        let caps = cal
+            .axis("distributive:access:agent_capabilities")
+            .expect("agent_capabilities present");
+        assert_eq!(
+            caps.threshold_function.concern_direction(),
+            ConcernDirection::AtOrBelow
         );
 
         // Tier-3 deferred axes are absent from the bundle.

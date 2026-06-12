@@ -258,9 +258,10 @@ pub fn score_against_axis(
     let direction = tf.concern_direction();
 
     // Zero-variance fail-secure: never emit a confident verdict on the
-    // degenerate (no-variance) case for a sentinel-threshold axis. Both
-    // crc-v2 zero-variance axes are upper-tail (AtOrAbove); the
-    // degenerate case is metric == 0, which must NOT fire the sentinel.
+    // degenerate (no-variance) case for a sentinel-threshold axis. The
+    // crc-v2 zero-variance axes are federation_membership (at_or_above)
+    // and rights_asymmetry (outside_corridor); the degenerate case is
+    // metric == 0, which must NOT fire the sentinel under either.
     if matches!(
         tf.calibration_outcome,
         Some(CalibrationOutcome::ZeroVarianceBaseline)
@@ -274,6 +275,18 @@ pub fn score_against_axis(
     let crosses = match direction {
         ConcernDirection::AtOrAbove => metric_value >= tf.threshold_value,
         ConcernDirection::AtOrBelow => metric_value <= tf.threshold_value,
+        ConcernDirection::OutsideCorridor => {
+            // Concern when the metric exits the healthy corridor at either
+            // pole. crc-v2 calibrates only the upper bound (== threshold_
+            // value); lower_bound is null/uncalibrated, so the lower-pole
+            // term is inert until crc-v3+ sets it. Forward-correct: a
+            // future bundle shipping lower_bound fires chaos-pole concern.
+            let above = metric_value >= tf.corridor_upper_bound();
+            let below = tf
+                .corridor_lower_bound()
+                .is_some_and(|lb| metric_value <= lb);
+            above || below
+        }
     };
 
     if crosses {
@@ -317,7 +330,11 @@ pub fn severity_scaled_score(metric_value: f64, axis: &AxisEntry) -> f64 {
     let t = tf.threshold_value;
 
     let frac = match tf.concern_direction() {
-        ConcernDirection::AtOrAbove => {
+        // OutsideCorridor fires upper-pole in crc-v2 (upper_bound ==
+        // threshold_value, lower_bound null), so its severity ramp is the
+        // same upper-tail ramp as AtOrAbove. When crc-v3+ calibrates a
+        // lower_bound, chaos-pole scaling gets its own arm.
+        ConcernDirection::AtOrAbove | ConcernDirection::OutsideCorridor => {
             // Severity grows as the metric exceeds the threshold toward
             // a per-metric ceiling. Bounded [0,1] metrics ramp toward
             // 1.0; unbounded metrics (footprint, CV) ramp over [t, 2t].
@@ -511,6 +528,11 @@ mod tests {
                 score_at_threshold: s0,
                 scaling: "magnitude_scales_with_severity_above_threshold".into(),
                 calibration_outcome: zvb.then_some(CalibrationOutcome::ZeroVarianceBaseline),
+                // These helpers exercise the pctile-inference path
+                // (concern_direction_field None); the explicit-field +
+                // corridor path is covered by its own test below.
+                concern_direction_field: None,
+                corridor: None,
             },
             statistical_floor: StatisticalFloor {
                 min_cohort_size_events: 1000,
@@ -574,6 +596,50 @@ mod tests {
                 assert!((s - (-0.9)).abs() < 1e-9, "halfway = -0.9, got {s}");
             }
             other => panic!("expected Numeric, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outside_corridor_fires_upper_pole_lower_inert_until_calibrated() {
+        use crate::scoring::axis_calibration::{ConcernDirection, Corridor};
+        // crc-v2 corridor axis: explicit OutsideCorridor + upper_bound ==
+        // threshold_value, lower_bound null (uncalibrated).
+        let mut a = axis(
+            "compute_gini",
+            0.169785,
+            Polarity::PositiveWhenDistributed,
+            -0.6,
+            false,
+        );
+        a.threshold_function.concern_direction_field = Some(ConcernDirection::OutsideCorridor);
+        a.threshold_function.corridor = Some(Corridor {
+            upper_bound: Some(0.169785),
+            lower_bound: None,
+        });
+        assert_eq!(
+            a.threshold_function.concern_direction(),
+            ConcernDirection::OutsideCorridor
+        );
+        // Above the upper bound → concern (anchored at s0 = -0.6).
+        match score_against_axis(0.169785, &a, AxisFamily::DistributiveAccess) {
+            ManifoldConformity::Numeric(s) => assert!((s - (-0.6)).abs() < 1e-9, "at upper = -0.6"),
+            other => panic!("expected Numeric, got {other:?}"),
+        }
+        // Below the upper bound with NO calibrated lower bound → conforming
+        // (chaos pole not flagged in crc-v2).
+        match score_against_axis(0.05, &a, AxisFamily::DistributiveAccess) {
+            ManifoldConformity::Numeric(s) => assert!(s.abs() < 1e-12, "below, lower null = 0"),
+            other => panic!("expected Numeric(0), got {other:?}"),
+        }
+        // Forward-correctness: once crc-v3 calibrates a lower_bound, the
+        // chaos pole fires too.
+        a.threshold_function.corridor = Some(Corridor {
+            upper_bound: Some(0.169785),
+            lower_bound: Some(0.02),
+        });
+        match score_against_axis(0.01, &a, AxisFamily::DistributiveAccess) {
+            ManifoldConformity::Numeric(s) => assert!(s < 0.0, "below lower_bound → concern"),
+            other => panic!("expected Numeric concern, got {other:?}"),
         }
     }
 
