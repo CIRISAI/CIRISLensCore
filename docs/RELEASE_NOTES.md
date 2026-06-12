@@ -1,5 +1,21 @@
 # CIRISLensCore Release Notes
 
+# v1.1.0 — science layer + node/RET modes + Windows wheel on PyPI
+
+**2026-06-12** — First feature release on the frozen v1.0 wire contract (the §8 canonical bytes are unchanged; all surface below is additive). Substrate floor: **persist 5.5.3 + edge 2.2.0 + verify 5.1.0**.
+
+Detectors & client surface (Wave 1):
+- **#3** — manifold mahalanobis detector. Diagonal Σ⁻¹ conformity scoring with a fail-secure trichotomy (Numeric / Indeterminate{ColdStart, SampleSizeBelowGate} / Unavailable{DegenerateCovariance}); consumes the RATCHET `crc-v1` §5.5.1 calibration bundle.
+- **#12** — `LensAudit` typed audit surface (consent grant/revoke/expire, WBD, identity-change) signed through the host Engine's audit canonicalizers.
+- **#14** — `EgressFilter` v0.4: 5-field extension (min_severity, include_detection_events/scores, redact_user_prompts/completions) + `apply_egress_filter` pure transform + PyO3 surface.
+
+Deployment modes (Wave 2):
+- **#15** — **node mode**: relay behavior plus the frozen public read API. Seven `GET /lens/api/v1/*` endpoints (scores, detection_events, manifold_conformity_aggregate, calibration_bundles) over an axum server, fronting the persist scores oracle. `LensCore::node(...)` + PyO3 `install_node`.
+- **#34** — **RET-native cutover scaffolding**: `transport-reticulum` enabled on the edge 2.2.0 pin; `LensCore::ret_relay` (the Reticulum-wire analogue of `relay`, same handler + persist cohabitation); `ciris-canonical` enrollment tracker; CEG-envelope state-publication builder with the cohort-scope suppression gate. Gated follow-ons filed upstream: PQC KEX session-wrap (CIRISEdge#95), Registry community publication (CIRISRegistry#73), announce rooting (follow-on to CIRISEdge#53).
+
+Packaging:
+- **#48 / #43.3** — the **Windows wheel now actually publishes to PyPI**. The wheel built green every tag run since v1.0.1 but never reached PyPI: `publish-pypi` did not depend on `pyo3-wheel-windows`, so its artifact download raced the slow vendored-OpenSSL build and shipped only the 3 fast wheels (the Windows wheel went solely to the GitHub Release). `pyo3-wheel-windows` is now a first-class `publish-pypi` gate and the pre-publish floor is 4 wheels. This is the **Win8/10/11** wheel (stable toolchain); **Win7** loadability (Rust ≥1.78 std hard-imports) is tracked in **#48**.
+
 # v1.0.1 — agent-fold patch (cross-wheel Engine + JCS/3.0.0 + release artifacts)
 
 **2026-06-11** — Patch from the CIRISAgent 2.9.6 fold (CIRISLensCore#43). Substrate floor: **persist 5.5.2 + edge 2.1.1 + verify 5.1.0** (the floor that carries the Windows port).
