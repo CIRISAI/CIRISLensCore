@@ -1,17 +1,23 @@
 //! `role/` — lens-core's deployment-mode runtimes (FSD §3).
 //!
-//! Lens-core runs in one of three modes:
+//! Lens-core runs in one of four modes. v0.2 ships **relay** (HTTP);
+//! v1.0 adds the **RET-native relay** (Reticulum canonical wire):
 //!
 //! - **client** (v0.3) — co-located with a CIRISAgent; captures the
 //!   agent's own traces locally and filters on egress.
-//! - **relay** (v0.2) — store-and-forward federation transit. Accepts
-//!   verified [`AccordEventsBatch`] traffic from peers over Edge,
-//!   persists it to the host's shared persist `Engine`, and is itself
-//!   a key-addressable Edge endpoint.
-//! - **node** (v0.4, this commit — CIRISLensCore#15) — relay behavior
-//!   plus the frozen public read API (`/lens/api/v1/*`) community lens
-//!   viewers consume. Federation-anchor deployments
-//!   (`safety.ciris.ai`-class) run node mode.
+//! - **relay** (v0.2, [`relay`]) — store-and-forward federation
+//!   transit over HTTP (documented fallback transport per MISSION.md §2).
+//!   Accepts verified [`AccordEventsBatch`] traffic from peers over Edge,
+//!   persists it to the host's shared persist `Engine`, and is itself a
+//!   key-addressable Edge endpoint.
+//! - **ret_relay** (v1.0, [`ret_relay`] — CIRISLensCore#34) — the
+//!   canonical-wire variant of relay mode: same handler, same persist
+//!   cohabitation, but wired over a Reticulum transport (Leviculum
+//!   stack). `LensCore::ret_relay` is the `LensCore::relay` analogue for
+//!   Reticulum-native deployments.
+//! - **node** (v0.4 — CIRISLensCore#15) — relay behavior plus the frozen
+//!   public read API (`/lens/api/v1/*`) community lens viewers consume.
+//!   Federation-anchor deployments (`safety.ciris.ai`-class) run node mode.
 //!
 //! [`AccordEventsBatch`]: ciris_edge::AccordEventsBatch
 //!
@@ -20,11 +26,11 @@
 //! Before this module, lens-core could *sign as* a key (its signed
 //! detection events carry `signing_key_id`, verifiable via
 //! `verify_hybrid_via_directory`) but could not *receive at* one —
-//! it had no Edge listener. [`LensCore::relay`] opens that listener:
-//! a peer that puts the relay's `key_id` in its `peer_urls` map can
-//! route an `AccordEventsBatch` to it and have it persisted.
+//! it had no Edge listener. [`LensCore::relay`] opens that listener
+//! over HTTP; [`LensCore::ret_relay`] opens it over Reticulum.
 //!
 //! [`LensCore::relay`]: crate::LensCore::relay
+//! [`LensCore::ret_relay`]: crate::LensCore::ret_relay
 //!
 //! # What node mode adds
 //!
@@ -37,7 +43,7 @@
 //!
 //! # Substrate boundaries
 //!
-//! Relay mode composes — it writes ~zero substrate code:
+//! Both relay modes compose — they write ~zero substrate code:
 //!
 //! - **Directory + queue** — the host `Engine`'s existing
 //!   `SqliteBackend`, shared (cohabitation: one connection pool, not
@@ -49,11 +55,12 @@
 //!   (CIRISPersist#89), called with `&NullScrubber` (see
 //!   [`handler`]).
 //! - **Transport-signing identity** — loaded via
-//!   `ciris_keyring::load_local_seed`.
+//!   `LocalSigner::from_keyring_seed_dir` (same as HTTP relay).
 
 pub mod handler;
 pub mod node;
 pub mod relay;
+pub mod ret_relay;
 
 pub use handler::LensCoreHandler;
 pub use node::{
@@ -61,3 +68,4 @@ pub use node::{
     ScoreListResponse, ScoreResponse,
 };
 pub use relay::{RelayError, RelayHandle};
+pub use ret_relay::RetRelayHandle;
