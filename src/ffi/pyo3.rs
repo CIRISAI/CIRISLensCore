@@ -1628,6 +1628,143 @@ impl PyLensNode {
     }
 }
 
+/// Start lens-core in **RET-native relay mode** from Python — bring up the
+/// Reticulum transport so a deployed lens becomes RET-addressable.
+///
+/// On first run this **generates the transport-tier Reticulum identity**
+/// (x25519 + ed25519) at `ret_identity_path` (chmod 600), binds the
+/// Leviculum TCP-server interface on `ret_listen_addr`, signs the AV-42
+/// announce attestation with the federation key loaded from `seed_dir`,
+/// and starts announcing the local destination. The returned handle
+/// exposes the transport pubkeys — feed them to the host Engine's
+/// `local_identity_aggregate(x25519_b64, ed25519_b64)` (CIRISPersist#199)
+/// to populate the aggregate federation identity's RET-transport role
+/// (the `reticulum_*_pubkey_b64` fields that are otherwise null).
+///
+/// Uses the host persist `Engine` singleton (construct `ciris_persist.
+/// Engine` first) on its runtime — same cohabitation contract as
+/// `install_node`. `key_id` must be a real `federation_keys.key_id` with
+/// an `ed25519.seed` (and optional `ml_dsa_65.seed`) under `seed_dir`.
+///
+/// # Errors
+/// - `RuntimeError("persist Engine not initialized …")`
+/// - `ValueError` — unparseable `ret_listen_addr` / bootstrap peer.
+/// - `RuntimeError("ret_relay: …")` — transport or signer startup failed.
+#[pyfunction]
+#[pyo3(signature = (key_id, seed_dir, ret_identity_path, ret_listen_addr, ret_bootstrap_peers=Vec::new()))]
+fn install_ret_relay(
+    key_id: String,
+    seed_dir: String,
+    ret_identity_path: String,
+    ret_listen_addr: String,
+    ret_bootstrap_peers: Vec<String>,
+) -> PyResult<PyRetRelay> {
+    use base64::Engine as _;
+
+    let rust_engine = ciris_persist::ffi::pyo3::current_rust_engine().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err(
+            "persist Engine not initialized — construct ciris_persist.Engine first",
+        )
+    })?;
+    let handle = ciris_persist::ffi::pyo3::current_runtime_handle().ok_or_else(|| {
+        pyo3::exceptions::PyRuntimeError::new_err("persist runtime handle not available")
+    })?;
+
+    let listen: std::net::SocketAddr = ret_listen_addr.parse().map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!(
+            "invalid ret_listen_addr {ret_listen_addr:?}: {e}"
+        ))
+    })?;
+    let peers: Vec<std::net::SocketAddr> = ret_bootstrap_peers
+        .iter()
+        .map(|p| {
+            p.parse::<std::net::SocketAddr>().map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "invalid bootstrap peer {p:?}: {e}"
+                ))
+            })
+        })
+        .collect::<PyResult<_>>()?;
+
+    let relay = handle
+        .block_on(crate::LensCore::ret_relay(
+            rust_engine,
+            key_id,
+            std::path::PathBuf::from(seed_dir),
+            std::path::PathBuf::from(ret_identity_path),
+            listen,
+            peers,
+        ))
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(format!("ret_relay: {e}")))?;
+
+    // Cache the b64 transport pubkeys now — they outlive `shutdown()`
+    // (which consumes the handle) and are the persist-aggregate inputs.
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let x25519_b64 = b64.encode(relay.transport_x25519_pubkey());
+    let ed25519_b64 = b64.encode(relay.transport_ed25519_pubkey());
+    let listen_str = relay.ret_listen_addr().to_string();
+
+    Ok(PyRetRelay {
+        inner: std::sync::Arc::new(tokio::sync::Mutex::new(Some(relay))),
+        x25519_b64,
+        ed25519_b64,
+        listen_addr: listen_str,
+    })
+}
+
+/// Python handle to a running RET-native relay. Carries the transport
+/// pubkeys (the `Engine.local_identity_aggregate` inputs) and an orderly
+/// `shutdown()`.
+#[pyclass(name = "RetRelay")]
+struct PyRetRelay {
+    inner: std::sync::Arc<tokio::sync::Mutex<Option<crate::role::RetRelayHandle>>>,
+    x25519_b64: String,
+    ed25519_b64: String,
+    listen_addr: String,
+}
+
+#[pymethods]
+impl PyRetRelay {
+    /// Base64 x25519 (encryption) transport pubkey — the
+    /// `reticulum_x25519_pubkey_b64` input to `local_identity_aggregate`.
+    fn transport_x25519_pubkey_b64(&self) -> &str {
+        &self.x25519_b64
+    }
+
+    /// Base64 ed25519 (signing) transport pubkey — the
+    /// `reticulum_ed25519_pubkey_b64` input to `local_identity_aggregate`.
+    fn transport_ed25519_pubkey_b64(&self) -> &str {
+        &self.ed25519_b64
+    }
+
+    /// The TCP socket the Reticulum TCP-server interface is bound to.
+    fn ret_listen_addr(&self) -> &str {
+        &self.listen_addr
+    }
+
+    /// Shut down the RET relay's Edge runtime. Idempotent.
+    fn shutdown(&self) -> PyResult<()> {
+        let handle = ciris_persist::ffi::pyo3::current_runtime_handle().ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("persist runtime handle not available")
+        })?;
+        let inner = std::sync::Arc::clone(&self.inner);
+        handle.block_on(async move {
+            let mut guard = inner.lock().await;
+            if let Some(relay) = guard.take() {
+                relay.shutdown().await.map_err(|e| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!("ret_relay shutdown: {e}"))
+                })
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("RetRelay(listen={}, <running>)", self.listen_addr)
+    }
+}
+
 // ─── Module entry ─────────────────────────────────────────────────
 
 /// PyO3 cdylib entry. The original 4 deployed-lens drop-in functions
@@ -1642,6 +1779,9 @@ fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ner_is_configured, m)?)?;
     m.add_function(wrap_pyfunction!(install_relay, m)?)?;
     m.add_function(wrap_pyfunction!(install_node, m)?)?;
+    // v1.4: RET-native relay bootstrap — generates + exposes the Reticulum
+    // transport identity for the aggregate federation ID (CIRISPersist#199).
+    m.add_function(wrap_pyfunction!(install_ret_relay, m)?)?;
     m.add_class::<PyLensClient>()?;
     // v0.3: typed audit log client (CIRISLensCore#12).
     m.add_class::<crate::audit::pyo3::PyLensAudit>()?;
@@ -1652,6 +1792,8 @@ fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScoringConfig>()?;
     m.add_class::<PyUxConfig>()?;
     m.add_class::<PyLensNode>()?;
+    // v1.4: RET-native relay handle (CIRISLensCore — reticulum transport ID).
+    m.add_class::<PyRetRelay>()?;
     m.add(
         "PROJECTION_VERSION",
         crate::extract::projection::PROJECTION_VERSION,

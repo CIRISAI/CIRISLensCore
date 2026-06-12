@@ -162,6 +162,16 @@ impl LensCore {
                 .map_err(RelayError::Transport)?,
         );
 
+        // Capture the generated transport-tier Reticulum dual-key public
+        // material BEFORE the transport Arc is moved into the Edge builder.
+        // `local_transport_pubkey()` is `[x25519(32) || ed25519(32)]` (edge
+        // reticulum.rs splits at [32..64]); these are exactly the
+        // caller-supplied inputs persist's `Engine::local_identity_aggregate`
+        // (CIRISPersist#199) needs to fold the RET-transport role into the
+        // aggregate federation identity. Exposing them is how a deployed
+        // lens turns its null `reticulum_*_pubkey_b64` identity fields live.
+        let transport_pubkey = ret_transport.local_transport_pubkey();
+
         let edge = Edge::builder()
             .directory(backend.clone())
             .queue(backend)
@@ -184,6 +194,7 @@ impl LensCore {
             shutdown_tx,
             join,
             ret_listen_addr,
+            transport_pubkey,
         })
     }
 }
@@ -196,6 +207,7 @@ pub struct RetRelayHandle {
     shutdown_tx: watch::Sender<bool>,
     join: JoinHandle<Result<(), EdgeError>>,
     ret_listen_addr: SocketAddr,
+    transport_pubkey: [u8; 64],
 }
 
 impl RetRelayHandle {
@@ -203,6 +215,31 @@ impl RetRelayHandle {
     /// is bound to.
     pub fn ret_listen_addr(&self) -> SocketAddr {
         self.ret_listen_addr
+    }
+
+    /// The generated transport-tier Reticulum dual-key public material:
+    /// `[x25519(32) || ed25519(32)]`. This is the identity the announce
+    /// attestation binds (AV-42) and the input persist's
+    /// `Engine::local_identity_aggregate` (CIRISPersist#199) folds into
+    /// the aggregate federation identity's RET-transport role.
+    pub fn transport_pubkey(&self) -> [u8; 64] {
+        self.transport_pubkey
+    }
+
+    /// The x25519 (encryption) half of the transport identity — the
+    /// `reticulum_x25519_pubkey_b64` field source.
+    pub fn transport_x25519_pubkey(&self) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&self.transport_pubkey[..32]);
+        k
+    }
+
+    /// The ed25519 (signing) half of the transport identity — the
+    /// `reticulum_ed25519_pubkey_b64` field source.
+    pub fn transport_ed25519_pubkey(&self) -> [u8; 32] {
+        let mut k = [0u8; 32];
+        k.copy_from_slice(&self.transport_pubkey[32..]);
+        k
     }
 
     /// Signal the Edge runtime to stop and await the listener task.
@@ -245,11 +282,20 @@ mod tests {
                 .unwrap();
             rt.block_on(async { tokio::spawn(async { Ok(()) }) })
         };
+        let mut pubkey = [0u8; 64];
+        for (i, b) in pubkey.iter_mut().enumerate() {
+            *b = i as u8;
+        }
         let rh = RetRelayHandle {
             shutdown_tx: tx,
             join: handle,
             ret_listen_addr: addr,
+            transport_pubkey: pubkey,
         };
         assert_eq!(rh.ret_listen_addr(), addr);
+        // The two halves split at byte 32 (x25519 || ed25519).
+        assert_eq!(rh.transport_x25519_pubkey(), pubkey[..32]);
+        assert_eq!(rh.transport_ed25519_pubkey(), pubkey[32..]);
+        assert_eq!(rh.transport_pubkey(), pubkey);
     }
 }

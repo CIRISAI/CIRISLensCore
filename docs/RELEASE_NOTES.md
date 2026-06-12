@@ -1,5 +1,15 @@
 # CIRISLensCore Release Notes
 
+# v1.4.0 — PyO3 RET-native relay: bring up the Reticulum transport from Python
+
+**2026-06-12** — Adds `install_ret_relay(...)`, the Python entry that brings up lens-core's Reticulum transport (previously rlib-only via `LensCore::ret_relay`). A deployed lens running under Python can now become RET-addressable instead of HTTP-relay-only. Substrate floor unchanged (persist 5.5.5 / edge 2.2.1 / verify 5.1.3). Folds in everything through 1.3.1 (crc-v2 + the concern_direction alignment).
+
+- **`install_ret_relay(key_id, seed_dir, ret_identity_path, ret_listen_addr, ret_bootstrap_peers=[])` → `RetRelay`.** Uses the host persist `Engine` singleton + its runtime (same cohabitation contract as `install_node`). On first run it generates the transport-tier Reticulum identity (x25519 + ed25519) at `ret_identity_path`, binds the Leviculum TCP-server interface, signs the AV-42 announce attestation with the federation key from `seed_dir`, and announces the local destination.
+- **`RetRelay` exposes the transport pubkeys** — `transport_x25519_pubkey_b64()` / `transport_ed25519_pubkey_b64()`. These are exactly the caller-supplied inputs to persist's `Engine.local_identity_aggregate(transport_x25519_b64, transport_ed25519_b64)` (CIRISPersist#199): feeding them populates the aggregate federation identity's RET-transport role, so a deployed lens's `reticulum_*_pubkey_b64` identity fields go from null to live. Plus `ret_listen_addr()` + idempotent `shutdown()`.
+- **Handle plumbing**: `RetRelayHandle` now captures `local_transport_pubkey()` (`[x25519(32) || ed25519(32)]`) from edge's `ReticulumTransport` and exposes `transport_pubkey()` / `transport_x25519_pubkey()` / `transport_ed25519_pubkey()`.
+
+Known gap: the raw dialable **RNS destination hash** (edge's internal `local_dest_hash`, `*dest.hash()`) has no edge accessor — lens-core exposes the transport pubkeys (the aggregate-ID inputs), not a re-derived destination. Tracked as a CIRISEdge ask for `ReticulumTransport::local_dest_hash()`.
+
 # v1.3.1 — read crc-v2's explicit concern_direction + corridor model (RATCHET#6)
 
 **2026-06-12** — Contract-alignment patch. RATCHET#6 (an explicit per-axis concern-direction field, asked as a crc-v3+ hardening) landed in **crc-v2 itself** — each axis now carries `threshold_function.concern_direction`, and the 4 corridor axes (compute, models, rights_asymmetry, informational_asymmetry) use a new `outside_corridor` direction with a `corridor: {upper_bound, lower_bound}`. lens-core now reads the explicit field instead of inferring from `threshold_pctile_of_observed`.
