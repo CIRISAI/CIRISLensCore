@@ -105,16 +105,16 @@ async-trait = "0.1"
 # (federation-tracked alongside the edge `time <0.3.48` follow-up).
 time = ">=0.3, <0.3.48"
 
-# Windows: selectively bundle OpenSSL (CIRISLensCore#43.3). `openssl-sys`
+# Windows OpenSSL: handled in CI via vcpkg static x64-windows-static
+# (the `pyo3-wheel-windows` job sets OPENSSL_DIR/OPENSSL_STATIC/
+# OPENSSL_NO_VENDOR), NOT a vendored Cargo feature (#48). `openssl-sys`
 # arrives transitively via edge's `transport-http`; the windows-latest
-# runner has no system OpenSSL, so the build fails. Enabling
-# `openssl/vendored` ONLY on windows (target-cfg) unifies the
-# `openssl-sys/vendored` feature for that target — OpenSSL is compiled
-# from source (openssl-src) and statically linked into the cdylib. No
-# effect on linux/macos (system OpenSSL, as today). Build needs nasm +
-# perl on the runner — see the `pyo3-wheel-windows` CI job.
-[target.'cfg(windows)'.dependencies]
-openssl = { version = "0.10", features = ["vendored"] }
+# runner has no system OpenSSL. The earlier `openssl/vendored` target-dep
+# (v1.1.0) compiled OpenSSL from source via openssl-src's perl/Configure,
+# but that target table does not map the Tier-3 `x86_64-win7-windows-msvc`
+# triple the Win7 wheel builds against — so the vendored dep is removed
+# and CI points openssl-sys at prebuilt vcpkg static libs instead. Mirror
+# of CIRISEdge v2.2.1 / CIRISPersist v5.5.5.
 
 [dev-dependencies]
 proptest = "1.4"
