@@ -746,8 +746,22 @@ jobs:
     runs-on: ubuntu-latest
     # Gate publish on every quality job — presence-of-wheel alone is
     # not a quality gate. Same closure persist + edge apply.
+    #
+    # `pyo3-wheel-windows` IS in this list (was not, through v1.0.1).
+    # That omission was the bug: without the dependency edge, this job's
+    # `download-artifact` step raced the Windows build (vendored OpenSSL
+    # compiles from source — minutes slower than the linux/darwin wheels)
+    # and ran BEFORE the `ciris_lens_core-wheel-windows-x86_64` artifact
+    # existed, so PyPI got only the 3 fast wheels every release while the
+    # Windows wheel went solely to the GitHub Release. The v1.0.1 tag run
+    # shows both jobs green yet PyPI carries 3 wheels — that race, not a
+    # build failure. CIRISAgent 2.9.6+ bootstrap-REQUIRES lens-core on
+    # Windows desktop, so the Windows wheel is now a first-class gate: a
+    # Windows build failure SHOULD block the release rather than silently
+    # ship a Windows-less wheel set the agent cannot boot against.
     needs:
       - pyo3-wheel
+      - pyo3-wheel-windows
       - lint
       - license-audit
       - linux-x86_64-test
@@ -772,16 +786,17 @@ jobs:
           merge-multiple: true
           path: dist
       - name: sanity-check wheel shapes before publish
-        # v1.0.1 (#43.3) — expect 3 wheels minimum (linux x86_64 +
-        # aarch64, darwin arm64). A fourth wheel (Windows x86_64)
-        # lands here when `pyo3-wheel-windows` succeeds; its absence
-        # is not an error because it is NON-GATING. `lt 3` is the
-        # floor; 3 or 4 both pass.
+        # Expect 4 wheels: linux x86_64 + aarch64, darwin arm64, AND
+        # windows x86_64. The Windows wheel is now gating (in `needs:`
+        # above), so its artifact is guaranteed present — the `lt 4`
+        # floor enforces that the Windows wheel actually reaches PyPI
+        # rather than silently dropping back to the pre-v1.0.2 3-wheel
+        # set on a Windows ListArtifacts hiccup.
         run: |
           ls -la dist/
           COUNT=$(ls dist/*.whl 2>/dev/null | wc -l)
-          if [ "${COUNT}" -lt 3 ]; then
-            echo "::error::Expected at least 3 wheels (linux x86_64 + aarch64, darwin arm64); got ${COUNT}"
+          if [ "${COUNT}" -lt 4 ]; then
+            echo "::error::Expected 4 wheels (linux x86_64 + aarch64, darwin arm64, windows x86_64); got ${COUNT}"
             ls dist/*.whl 2>/dev/null || echo "  (no .whl files at all)"
             exit 1
           fi
@@ -825,7 +840,8 @@ jobs:
   #     └── ios-device/ciris_lens_core.abi3.so
   #     └── ios-simulator/ciris_lens_core.abi3.so
   #   ciris_lens_core-{VERSION}-cp310-abi3-win_amd64.whl  (Windows)
-  #     └── uploaded as a release asset (not to PyPI — v1.0.2 follow-up)
+  #     └── uploaded as a release asset AND (v1.0.2+) published to PyPI
+  #         via the `pyo3-wheel-windows` → `publish-pypi` needs edge.
   #   SHA256SUMS
   #
   # ADDITIVE + NON-GATING: this job does NOT appear in publish-pypi's
