@@ -66,9 +66,13 @@ classifiers = [
 # Python dispatch (LensClient(engine=...), edge v2.1.0 PyEdge::engine()),
 # version-tolerant across the v5 line. The HOST pins the exact persist;
 # lens-core just needs compatibility. The exact pin was blocking persist
-# v5.3.0 currency (matrix held 5.2.0 for it). Mirrors edge's >=5.2.0,<6.
+# v5.3.0 currency. Floor raised to `>=5.5.5,<6` (v1.2.0 / #48) so pip
+# installs a Win7-capable + RUSTSEC-2026-0178/0179/0180-fixed persist host
+# alongside lens-core's own Win7 wheel; the `<6` ceiling holds the family
+# on the persist 5.x / pyo3 0.28 line (persist 6.0.0 is the separate pyo3
+# 0.29 lockstep). Mirrors edge v2.2.1's `>=5.5.5,<6` exactly.
 dependencies = [
-    "ciris-persist>=5.2.0,<6",
+    "ciris-persist>=5.5.5,<6",
 ]
 dynamic = ["version"]
 
