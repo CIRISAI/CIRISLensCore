@@ -87,6 +87,13 @@ thiserror = "1.0"
 # same macro the trait declares it with.
 async-trait = "0.1"
 
+# TEMPORARY pin — `time` 0.3.48 adds an `Into<String>` impl that
+# conflicts with rcgen's (transitive via edge's transport-http TLS),
+# breaking the build with E0119. Mirrors the edge/persist family pin.
+# Drop when rcgen ships a release that handles the new impl
+# (federation-tracked alongside the edge `time <0.3.48` follow-up).
+time = ">=0.3, <0.3.48"
+
 # Windows: selectively bundle OpenSSL (CIRISLensCore#43.3). `openssl-sys`
 # arrives transitively via edge's `transport-http`; the windows-latest
 # runner has no system OpenSSL, so the build fails. Enabling
