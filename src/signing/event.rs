@@ -318,6 +318,9 @@ fn unavailable_payload(reason: &UnavailableReason) -> Value {
             "detector": detector,
         }),
         UnavailableReason::LocalSignFailure => json!({ "reason": "local_sign_failure" }),
+        UnavailableReason::DegenerateCovariance => {
+            json!({ "reason": "degenerate_covariance" })
+        }
     }
 }
 

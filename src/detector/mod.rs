@@ -41,10 +41,12 @@ use ciris_persist::pipeline::extract::Features;
 pub mod coherence_ratchet;
 pub mod correlated_action;
 pub mod distributive_access;
+pub mod manifold;
 
 pub use coherence_ratchet::CoherenceRatchetDetector;
 pub use correlated_action::{CorrelatedActionAxis, CorrelatedActionInput};
 pub use distributive_access::{DistributiveAccessInput, DistributiveAccessResource};
+pub use manifold::{detect_manifold, score_mahalanobis, ManifoldScoreOutcome};
 
 /// Per-trace detection outcome from the detector stage. Maps to an
 /// [`AssemblyInput`][ai] variant in the orchestrator.

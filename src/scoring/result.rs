@@ -123,6 +123,21 @@ pub enum UnavailableReason {
     /// itself was computed, but the signed-record path didn't land.
     /// Caller decides whether to surface or retry.
     LocalSignFailure,
+    /// The calibration bundle's covariance data is degenerate — a
+    /// retained feature has `variance ≤ 0`, or the standardization
+    /// produced NaN/Inf (e.g. `std = 0` in a retained field). This is
+    /// a RATCHET-bundle data quality problem, not an SLO failure.
+    ///
+    /// Distinct from `CohortColdStart` (centroid simply not present)
+    /// and `SampleSizeBelowGate` (centroid present but underpopulated).
+    /// Here the centroid *exists* and the sample gate *passed*, but the
+    /// math to produce a valid Mahalanobis distance failed because the
+    /// precision matrix is not positive-definite.
+    ///
+    /// Per LC-AV-18 P0: we refuse to emit a fabricated numeric score.
+    /// Callers should surface this as `ManifoldConformity::Unavailable`
+    /// and alert RATCHET that the bundle needs re-calibration.
+    DegenerateCovariance,
 }
 
 /// A single detection event from one of the layered detectors

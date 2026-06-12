@@ -62,9 +62,12 @@ use ciris_persist::Journal;
 use serde_json::Value;
 
 use crate::cohort;
-use crate::detector::{detect, DetectionResult};
+use crate::detector::{detect, detect_manifold, DetectionResult};
+use crate::extract::project;
 use crate::scoring::calibration::CalibrationBundle;
-use crate::scoring::result::{IndeterminateReason, ManifoldConformity, Score, Severity};
+use crate::scoring::result::{
+    IndeterminateReason, ManifoldConformity, Score, Severity, UnavailableReason,
+};
 use crate::scoring::{assemble, AssemblyInput};
 use crate::signing::{sign_detection, DetectionInputs, SigningError};
 
@@ -173,10 +176,18 @@ impl LensCore {
         // 3. Extract typed Features via persist's free function.
         let features = extract_features(&body, declared.clone());
 
+        // 3b. Project the typed Features to the 16-element numeric vector
+        // for Mahalanobis scoring. Done once here and threaded through the
+        // manifold detector; the 5 Coherence-Ratchet detectors are Phase 2
+        // and still no-op, so they don't consume this vector yet.
+        let raw_projection = project(&features);
+
         // 4. Build the cohort_cell JSON for the signed event.
         let cohort_cell = cohort::cohort_cell(&declared);
 
-        // 5. Detector → DetectionResult. v0.1.0 no-op: None.
+        // 5. Detector → DetectionResult. The 5 Coherence-Ratchet
+        // detectors are still no-op (Phase 2 TBD); only the manifold
+        // conformity path is live as of CIRISLensCore#3 Phase 2.
         let detection = detect(&features);
 
         // 6. Resolve the calibration-derived inputs. When a bundle is
@@ -191,9 +202,46 @@ impl LensCore {
         // 7. Convert detection outcome to assembly input. The bundle
         // lookup informs the cold-start vs. sample-below-gate fork
         // when the detector hasn't produced a Mahalanobis distance.
+        // When the cohort centroid is present and above the sample-size
+        // gate, the Phase-2 manifold scorer runs and returns either a
+        // numeric distance or `Unavailable { DegenerateCovariance }`.
         let assembly_input = match detection {
             DetectionResult::None => {
-                assembly_input_from_bundle(self.bundle.as_deref(), &cohort_cell)
+                match assembly_input_from_bundle(
+                    self.bundle.as_deref(),
+                    &cohort_cell,
+                    &raw_projection,
+                ) {
+                    Ok(input) => input,
+                    Err(unavailable_reason) => {
+                        // Manifold scorer failed (degenerate covariance or NaN).
+                        // Route directly to Unavailable — skip assembly.
+                        let conformity = ManifoldConformity::Unavailable {
+                            reason: unavailable_reason,
+                        };
+                        let inputs = DetectionInputs {
+                            trace_id: trace_id.clone(),
+                            body_sha256: trace.body_sha256.to_vec(),
+                            detector: "manifold_conformity",
+                            severity: severity_from(&conformity),
+                            cohort_cell,
+                            conformity: &conformity,
+                            lens_core_version: LENS_CORE_VERSION,
+                            ratchet_calibration_version: effective_version,
+                        };
+                        let (event, summary) = sign_detection(&self.signer, inputs).await?;
+                        let cohort_id = format_cohort_id(&features.declared);
+                        return Ok(Outcome {
+                            score: Score {
+                                conformity,
+                                cohort_id,
+                                lens_core_version: LENS_CORE_VERSION,
+                                detection_events: vec![summary],
+                            },
+                            event,
+                        });
+                    }
+                }
             }
             DetectionResult::Manifold {
                 mahalanobis,
@@ -262,47 +310,64 @@ pub enum ProcessError {
     Sign(#[from] SigningError),
 }
 
-/// Decide the assembly input when the detector produced no
-/// detection (the v0.1.0 no-op default).
+/// Decide the assembly input when the 5 Coherence-Ratchet detectors
+/// produced no detection (still no-op in Phase 2). The manifold
+/// conformity path runs here when the bundle + centroid lookup
+/// succeeds and the cohort is at-or-above the sample-size gate.
 ///
 /// The fork:
 ///
-/// - No bundle hydrated → `CohortColdStart` (pre-#3 cold-start).
+/// - No bundle hydrated → `Ok(CohortColdStart)` (pre-#3 cold-start).
 /// - Bundle present, cohort not in `cohort_centroids` →
-///   `CohortColdStart` (this specific cohort hasn't been observed
+///   `Ok(CohortColdStart)` (this specific cohort hasn't been observed
 ///   in calibration corpus).
 /// - Bundle present, cohort sample below gate →
-///   `BundleSampleBelowGate { current, gate }`. Routes through the
+///   `Ok(BundleSampleBelowGate { current, gate })`. Routes through the
 ///   same `Indeterminate { SampleSizeBelowGate }` shape as
 ///   detector-fired `Scored`-below-gate.
-/// - Bundle present, cohort at-or-above gate → still
-///   `CohortColdStart`. The v0.1.0 detector body hasn't been
-///   implemented, so even when the bundle would let us score we
-///   have no Mahalanobis distance to emit. Phase 2 lands the real
-///   detector, at which point this branch becomes unreachable.
+/// - Bundle present, cohort at-or-above gate → **Phase 2 manifold
+///   scorer runs.** Returns `Ok(Scored { mahalanobis, cohort_sample_count })`
+///   on success, or `Err(UnavailableReason)` when the covariance is
+///   degenerate (NaN/Inf, non-positive-definite diagonal). The caller
+///   must surface `Err` as `ManifoldConformity::Unavailable`.
 fn assembly_input_from_bundle(
     bundle: Option<&CalibrationBundle>,
     cohort_cell: &Value,
-) -> AssemblyInput {
+    raw_projection: &[f64; crate::extract::projection::PROJECTION_DIM],
+) -> Result<AssemblyInput, UnavailableReason> {
     let Some(bundle) = bundle else {
-        return AssemblyInput::CohortColdStart;
+        return Ok(AssemblyInput::CohortColdStart);
     };
     let Some(centroid) = bundle.lookup_cohort(cohort_cell) else {
-        return AssemblyInput::CohortColdStart;
+        return Ok(AssemblyInput::CohortColdStart);
     };
     let current = u32::try_from(centroid.sample_count).unwrap_or(u32::MAX);
     if current < bundle.sample_size_gate {
-        AssemblyInput::BundleSampleBelowGate {
+        return Ok(AssemblyInput::BundleSampleBelowGate {
             current,
             gate: bundle.sample_size_gate,
-        }
-    } else {
-        // Phase 2 detector body lands here; v0.1.0 has no Mahalanobis
-        // to emit so we still route through cold-start. Once the
-        // detector lands, replace this branch with the real
-        // `Scored { mahalanobis, cohort_sample_count: current }`.
-        AssemblyInput::CohortColdStart
+        });
     }
+    // Cohort is at-or-above the sample-size gate: run the Phase-2
+    // manifold scorer. CIRISLensCore#3 Phase 2 closure.
+    detect_manifold(raw_projection, bundle, centroid).map(|detection| match detection {
+        DetectionResult::Manifold {
+            mahalanobis,
+            cohort_sample_count,
+        } => AssemblyInput::Scored {
+            mahalanobis,
+            cohort_sample_count,
+        },
+        // detect_manifold only returns Manifold or errors; the
+        // other variants come from different detector paths.
+        other => {
+            tracing::warn!(
+                "unexpected DetectionResult from detect_manifold: {other:?}; \
+                     routing to CohortColdStart"
+            );
+            AssemblyInput::CohortColdStart
+        }
+    })
 }
 
 /// Map a [`ManifoldConformity`] to the detection-event severity
