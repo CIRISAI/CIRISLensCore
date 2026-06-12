@@ -304,6 +304,10 @@ fn process_one<'py>(
         // to "no calibration applied" (matches the every-trace-
         // Indeterminate scoring behavior).
         ratchet_calibration_version: 0,
+        // Manifold-conformity detector carries no axis-family
+        // calibration; axis-family evidence_refs are emitted only by
+        // the F-3 / distributive detectors (crc-v2).
+        evidence_refs: Vec::new(),
     };
     let prepared = prepare_detection(&inputs, signing_key_id)
         .map_err(|e| PyRuntimeError::new_err(format!("prepare: {e}")))?;
@@ -1651,6 +1655,17 @@ fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "PROJECTION_VERSION",
         crate::extract::projection::PROJECTION_VERSION,
+    )?;
+    // crc-v2 axis-family calibration surface (F-3 + distributive
+    // detectors). Distinct from the manifold PROJECTION_VERSION
+    // (crc-v1) — the axis-family axes are calibrated independently.
+    m.add(
+        "AXIS_CALIBRATION_VERSION",
+        crate::scoring::axis_calibration::AXIS_CALIBRATION_VERSION,
+    )?;
+    m.add(
+        "RATCHET_AXIS_CALIBRATION_VERSION",
+        crate::scoring::axis_calibration::RATCHET_AXIS_CALIBRATION_VERSION,
     )?;
     Ok(())
 }

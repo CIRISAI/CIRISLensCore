@@ -228,6 +228,7 @@ impl LensCore {
                             conformity: &conformity,
                             lens_core_version: LENS_CORE_VERSION,
                             ratchet_calibration_version: effective_version,
+                            evidence_refs: Vec::new(),
                         };
                         let (event, summary) = sign_detection(&self.signer, inputs).await?;
                         let cohort_id = format_cohort_id(&features.declared);
@@ -269,6 +270,7 @@ impl LensCore {
             conformity: &conformity,
             lens_core_version: LENS_CORE_VERSION,
             ratchet_calibration_version: effective_version,
+            evidence_refs: Vec::new(),
         };
         let (event, summary) = sign_detection(&self.signer, inputs).await?;
 
