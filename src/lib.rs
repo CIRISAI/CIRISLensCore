@@ -67,6 +67,7 @@
 // kicks off. Each module's mission is documented in MISSION.md §2;
 // this file just declares the scope.
 
+pub mod audit;
 pub mod capacity;
 pub mod capture;
 pub mod cohort;
@@ -87,6 +88,10 @@ pub mod wire;
 // today; agent post-fold) consumes. Stable across patch versions;
 // changes require a deprecation window.
 
+pub use audit::{
+    AuditedAction, ConsentEvent, ConsentEventType, IdentityChange, TypedAuditEvent,
+    WisdomBasedDeferral,
+};
 pub use capacity::{
     AntiGoodhartViolation, CapacityAttestation, CapacityFactorError, CapacityFactors,
 };
