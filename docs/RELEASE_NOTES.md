@@ -1,5 +1,24 @@
 # CIRISLensCore Release Notes
 
+# v1.3.0 — crc-v2 axis-family calibration: F-3 + distributive detectors live
+
+**2026-06-12** — Consumes RATCHET's **crc-v2** calibration package (closes RATCHET#2/#3/#5), flipping the F-3 (`correlated_action:*`) and distributive (`distributive:access:*`) detectors from `AxisAwaitingCalibration` scaffolds to live readings. Substrate floor unchanged (persist 5.5.5 / edge 2.2.1 / verify 5.1.3); wire contract unchanged (additive).
+
+**8 axes now live** (`src/detector/axis_metrics.rs` + `src/scoring/axis_calibration.rs`):
+- Tier-1 full: `distributive:access:compute` (Gini ≥ 0.169785), `distributive:access:models` (HHI ≥ 1.0).
+- Tier-1 zero-variance-baseline (1e-6 sentinel, fail-secure to Indeterminate on the degenerate no-variance case): `distributive:access:federation_membership`, `correlated_action:rights_asymmetry`.
+- Tier-2 proxy: `correlated_action:participation_exclusion`, `correlated_action:informational_asymmetry`, `correlated_action:aggregate_footprint`, `distributive:access:agent_capabilities`.
+
+Each detector aggregates a signed-trace corpus per `agent_id_hash`, computes the bundle's metric, and applies the calibrated threshold with the `threshold_function.polarity` convention. The binary concern/conforming crossing and the `score_at_threshold` anchor are exact against the bundle; the interior severity ramp is lens-core's documented monotone modeling choice (per the bundle `sole_evidence_rule`, `detection:*` is never sole evidence for `slashing:*`).
+
+**evidence_refs[] contract** (`src/signing/event.rs`): attestations carry `crc-v2:bundle.sha256:<hash>` + corpus trace hash + cohort delineation + per-axis `evidence_required` fields, with the **CEG §15.2 R2 dual-hash transition discipline** (emit both crc-v{N} and crc-v{N+1} hashes during a calibration transition to defeat straddle attacks).
+
+**Still deferred** (`AxisAwaitingCalibration`, gated on CIRISAgent substrate emission): `distributive:access:training_data` + the 4 `correlated_action:ecology_of_communication:*` axes — Tier-3, blocked on CIRISAgent#876/#877/#880.
+
+**Calibration versioning** is a separate track from the manifold projection: `AXIS_CALIBRATION_VERSION="crc-v2"` / `RATCHET_AXIS_CALIBRATION_VERSION=2` (manifold stays on `PROJECTION_VERSION="crc-v1"` — a structurally different 16-field projection that did not change).
+
+Follow-up: the cohort-scoring **orchestration** (periodic corpus assembly → score → emit) is library-ready but not yet wired into the running node — tracked separately.
+
 # v1.2.0 — Win7-capable Windows wheel + substrate floor to the v2.2.1 cycle
 
 **2026-06-12** — Win7 support + the synchronized family floor bump. Substrate floor: **persist 5.5.5 + edge 2.2.1 + verify 5.1.3**. No API change vs 1.1.0 — additive packaging + floor move.
