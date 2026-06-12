@@ -68,6 +68,7 @@
 // this file just declares the scope.
 
 pub mod audit;
+pub mod canonical;
 pub mod capacity;
 pub mod capture;
 pub mod cohort;
@@ -92,6 +93,13 @@ pub use audit::{
     AuditedAction, ConsentEvent, ConsentEventType, IdentityChange, TypedAuditEvent,
     WisdomBasedDeferral,
 };
+pub use canonical::{
+    ceg_egress::{
+        build_state_publication, DetectionAttestation, LensStatePublication,
+        LENS_STATE_PUBLICATION_TYPE,
+    },
+    CanonicalPeerEnrollment, EnrollmentError, CIRIS_CANONICAL_COMMUNITY_KEY_ID,
+};
 pub use capacity::{
     AntiGoodhartViolation, CapacityAttestation, CapacityFactorError, CapacityFactors,
 };
@@ -99,6 +107,6 @@ pub use config::{apply_egress_filter, EgressFilter, RetentionPolicy, UpstreamLen
 pub use detector::CoherenceRatchetDetector;
 pub use pipeline::lifecycle::{LensCore, Outcome};
 pub use retention::{evict_per_retention_policy, EvictionError, EvictionPlan, EvictionSummary};
-pub use role::{LensCoreHandler, RelayError, RelayHandle};
+pub use role::{LensCoreHandler, RelayError, RelayHandle, RetRelayHandle};
 pub use scores::{AgentScoreAggregate, OracleError, ScoresOracle, SeverityDistribution};
 pub use scoring::result::{ManifoldConformity, Score};
