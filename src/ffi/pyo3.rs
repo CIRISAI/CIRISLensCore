@@ -53,6 +53,7 @@ use crate::capture::correlation::CorrelationMetadata;
 use crate::capture::partial::InboundEvent;
 use crate::capture::py_engine::{NonSealingKind, PyEngineCapture, PyPrepareOutcome};
 use crate::cohort;
+use crate::config::EgressFilter;
 use crate::detector::{detect, DetectionResult};
 use crate::pipeline::lifecycle::LENS_CORE_VERSION;
 use crate::scoring::result::{ManifoldConformity, Severity};
@@ -1086,6 +1087,182 @@ fn dict_to_inbound_event(d: &Bound<'_, PyDict>) -> PyResult<InboundEvent> {
     })
 }
 
+// ─── EgressFilter PyO3 class (#14) ────────────────────────────────
+
+/// Parse a Python severity string into [`DetectionSeverity`].
+fn parse_severity(s: &str) -> PyResult<ciris_persist::derived::types::DetectionSeverity> {
+    use ciris_persist::derived::types::DetectionSeverity;
+    match s {
+        "info" => Ok(DetectionSeverity::Info),
+        "warning" => Ok(DetectionSeverity::Warning),
+        "critical" => Ok(DetectionSeverity::Critical),
+        other => Err(PyValueError::new_err(format!(
+            "invalid severity {other:?}; expected one of: info, warning, critical"
+        ))),
+    }
+}
+
+/// Per-upstream forwarding policy — the CIRISLensCore#14 v0.4 surface.
+///
+/// Configures what a client-mode node forwards to a specific upstream
+/// lens. Each `UpstreamLens` carries one `EgressFilter`; the filter
+/// is applied per-trace before dispatch.
+///
+/// # Python constructor
+///
+/// ```python
+/// import ciris_lens_core as cl
+///
+/// # Privacy-conservative posture (all redaction on, generic level):
+/// f = cl.EgressFilter(
+///     trace_level="generic",  # "generic" | "detailed" | "full_traces"
+/// )
+///
+/// # Fully specified:
+/// f = cl.EgressFilter(
+///     trace_level="detailed",
+///     min_severity="warning",      # None | "info" | "warning" | "critical"
+///     include_detection_events=True,
+///     include_scores=True,
+///     redact_user_prompts=True,    # default True (privacy-safe)
+///     redact_completions=True,     # default True (privacy-safe)
+/// )
+/// ```
+///
+/// # Defaults
+///
+/// | Field | Default |
+/// |---|---|
+/// | `trace_level` | (required) |
+/// | `min_severity` | `None` (no gate) |
+/// | `include_detection_events` | `True` |
+/// | `include_scores` | `True` |
+/// | `redact_user_prompts` | `True` (privacy-safe) |
+/// | `redact_completions` | `True` (privacy-safe) |
+#[pyclass(name = "EgressFilter")]
+struct PyEgressFilter {
+    inner: EgressFilter,
+}
+
+#[pymethods]
+impl PyEgressFilter {
+    /// Construct an `EgressFilter`.
+    ///
+    /// # Arguments
+    ///
+    /// - `trace_level` — content ceiling for this upstream; one of
+    ///   `"generic"`, `"detailed"`, `"full_traces"`.
+    /// - `min_severity` — severity gate; `None` or one of `"info"`,
+    ///   `"warning"`, `"critical"`. `None` = no gate (all traces
+    ///   forwarded).
+    /// - `include_detection_events` — forward `llm_call` components.
+    ///   Default `True`.
+    /// - `include_scores` — forward score fields in component data.
+    ///   Default `True`.
+    /// - `redact_user_prompts` — blank `user_prompt` in component
+    ///   data. Default `True` (privacy-safe).
+    /// - `redact_completions` — blank `llm_completion` in component
+    ///   data. Default `True` (privacy-safe).
+    #[new]
+    #[pyo3(signature = (
+        trace_level,
+        min_severity = None,
+        include_detection_events = true,
+        include_scores = true,
+        redact_user_prompts = true,
+        redact_completions = true,
+    ))]
+    fn new(
+        trace_level: &str,
+        min_severity: Option<&str>,
+        include_detection_events: bool,
+        include_scores: bool,
+        redact_user_prompts: bool,
+        redact_completions: bool,
+    ) -> PyResult<Self> {
+        let tl = parse_level(trace_level)?;
+        let sev = min_severity.map(parse_severity).transpose()?;
+        Ok(Self {
+            inner: EgressFilter::with_all(
+                tl,
+                sev,
+                include_detection_events,
+                include_scores,
+                redact_user_prompts,
+                redact_completions,
+            ),
+        })
+    }
+
+    /// The trace_level ceiling for this filter.
+    #[getter]
+    fn trace_level(&self) -> &'static str {
+        match self.inner.trace_level {
+            TraceLevel::Generic => "generic",
+            TraceLevel::Detailed => "detailed",
+            TraceLevel::FullTraces => "full_traces",
+        }
+    }
+
+    /// The minimum severity gate (None if no gate).
+    #[getter]
+    fn min_severity(&self) -> Option<&'static str> {
+        self.inner.min_severity.map(|s| {
+            use ciris_persist::derived::types::DetectionSeverity;
+            match s {
+                DetectionSeverity::Info => "info",
+                DetectionSeverity::Warning => "warning",
+                DetectionSeverity::Critical => "critical",
+            }
+        })
+    }
+
+    /// Whether detection-event components are forwarded.
+    #[getter]
+    fn include_detection_events(&self) -> bool {
+        self.inner.include_detection_events
+    }
+
+    /// Whether score fields in component data are forwarded.
+    #[getter]
+    fn include_scores(&self) -> bool {
+        self.inner.include_scores
+    }
+
+    /// Whether `user_prompt` fields are redacted.
+    #[getter]
+    fn redact_user_prompts(&self) -> bool {
+        self.inner.redact_user_prompts
+    }
+
+    /// Whether `llm_completion` fields are redacted.
+    #[getter]
+    fn redact_completions(&self) -> bool {
+        self.inner.redact_completions
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "EgressFilter(trace_level={:?}, min_severity={:?}, \
+             include_detection_events={}, include_scores={}, \
+             redact_user_prompts={}, redact_completions={})",
+            self.trace_level(),
+            self.inner.min_severity.map(|s| {
+                use ciris_persist::derived::types::DetectionSeverity;
+                match s {
+                    DetectionSeverity::Info => "info",
+                    DetectionSeverity::Warning => "warning",
+                    DetectionSeverity::Critical => "critical",
+                }
+            }),
+            self.inner.include_detection_events,
+            self.inner.include_scores,
+            self.inner.redact_user_prompts,
+            self.inner.redact_completions,
+        )
+    }
+}
+
 // ─── Module entry ─────────────────────────────────────────────────
 
 /// PyO3 cdylib entry. The original 4 deployed-lens drop-in functions
@@ -1098,6 +1275,7 @@ fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ner_is_configured, m)?)?;
     m.add_function(wrap_pyfunction!(install_relay, m)?)?;
     m.add_class::<PyLensClient>()?;
+    m.add_class::<PyEgressFilter>()?;
     m.add(
         "PROJECTION_VERSION",
         crate::extract::projection::PROJECTION_VERSION,

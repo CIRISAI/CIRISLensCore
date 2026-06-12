@@ -28,6 +28,6 @@ pub mod egress;
 pub mod retention;
 pub mod upstream;
 
-pub use egress::EgressFilter;
+pub use egress::{apply_egress_filter, EgressFilter};
 pub use retention::RetentionPolicy;
 pub use upstream::UpstreamLens;
