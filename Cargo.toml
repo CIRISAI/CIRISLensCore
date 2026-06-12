@@ -74,8 +74,19 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 hex  = "0.4"
 
+# HTTP server — node mode's read API (CIRISLensCore#15). axum 0.8 is
+# already in the transitive dependency graph via edge's
+# `transport-http` feature; we declare it directly here so node mode's
+# API layer can import axum types without relying on the transitive
+# path (which could change with an edge bump). Pin matches the version
+# edge's transport-http pulls in (0.8.x).
+axum = "0.8"
+
+# tower::ServiceExt is used in node mode tests for `oneshot` requests.
+tower = { version = "0.5", features = ["util"] }
+
 # Async + observability
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
 tracing = "0.1"
 opentelemetry = "0.21"
 
