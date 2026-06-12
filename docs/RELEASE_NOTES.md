@@ -1,5 +1,12 @@
 # CIRISLensCore Release Notes
 
+# v1.2.0 — Win7-capable Windows wheel + substrate floor to the v2.2.1 cycle
+
+**2026-06-12** — Win7 support + the synchronized family floor bump. Substrate floor: **persist 5.5.5 + edge 2.2.1 + verify 5.1.3**. No API change vs 1.1.0 — additive packaging + floor move.
+
+- **#48 — Win7 SP1 / Server 2008 R2 loadability.** The Windows wheel now builds with the Tier-3 `x86_64-win7-windows-msvc` target (nightly + `rust-src` + `-Zbuild-std`), so std keeps the Win7 fallback paths instead of stable ≥1.78's hard-imported Win8/Win10 APIs (`WaitOnAddress`/`GetSystemTimePreciseAsFileTime`/`ProcessPrng`). lens-core statically bundles persist/edge/verify, so build-std recompiles the embedded substrate for Win7 too — the single `win_amd64.whl` runs Win7 SP1 → Win11. OpenSSL moved from vendored/Strawberry-Perl to vcpkg static (the openssl-src Configure target table doesn't map the Tier-3 triple). Mirrors CIRISEdge v2.2.1 / CIRISPersist v5.5.5 / CIRISVerify v5.1.3.
+- **Substrate floor → the v2.2.1 cycle** — Cargo links persist v5.5.5 + edge v2.2.1 + keyring/verify v5.1.3; pyproject floor raised to `ciris-persist>=5.5.5,<6` (Win7-capable + RUSTSEC-2026-0178/0179/0180-fixed host; `<6` holds the family on persist 5.x / pyo3 0.28 — persist 6.0.0 is the separate pyo3 0.29 lockstep cycle).
+
 # v1.1.0 — science layer + node/RET modes + Windows wheel on PyPI
 
 **2026-06-12** — First feature release on the frozen v1.0 wire contract (the §8 canonical bytes are unchanged; all surface below is additive). Substrate floor: **persist 5.5.3 + edge 2.2.0 + verify 5.1.0**.
