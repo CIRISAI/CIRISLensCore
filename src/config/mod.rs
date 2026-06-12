@@ -25,9 +25,11 @@
 //! is `#[non_exhaustive]` is a minor-version operation, not a break.
 
 pub mod egress;
+pub mod node;
 pub mod retention;
 pub mod upstream;
 
 pub use egress::{apply_egress_filter, EgressFilter};
+pub use node::{PeerAcl, ScoringConfig, UxConfig};
 pub use retention::RetentionPolicy;
 pub use upstream::UpstreamLens;
