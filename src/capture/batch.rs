@@ -354,4 +354,142 @@ mod tests {
             "tampered trace must fail persist verify"
         );
     }
+
+    // ── CIRISLensCore#43.2: 3.0.0 / JCS round-trip proof ────────────────────
+
+    /// A 3.0.0-stamped trace (the new default after the TRACE_SCHEMA_VERSION
+    /// flip). The canonical field layout is identical to the 2.7.9 shape
+    /// (9 envelope fields + optional `deployment_profile`), only the
+    /// canonicalizer changes. deployment_profile is OPTIONAL at 3.0.0 per
+    /// persist v5.2.0 `BatchEnvelope::from_json` (the strict-require gate
+    /// is `"2.7.9"` only). We include it here anyway to prove it round-trips.
+    fn sealed_300_trace() -> CompleteTrace {
+        CompleteTrace {
+            trace_id: "trace-300".into(),
+            thought_id: "th_300".into(),
+            task_id: Some("task-300".into()),
+            agent_id_hash: "deadbeef".into(),
+            started_at: "2026-06-08T00:00:00+00:00".into(),
+            completed_at: Some("2026-06-08T00:00:02+00:00".into()),
+            components: vec![
+                component(
+                    ReasoningEventType::ThoughtStart,
+                    ComponentType::Observation,
+                    "2026-06-08T00:00:00+00:00",
+                    0,
+                    serde_json::json!({"thought": "hello JCS"}),
+                ),
+                component(
+                    ReasoningEventType::ActionResult,
+                    ComponentType::Action,
+                    "2026-06-08T00:00:02+00:00",
+                    0,
+                    serde_json::json!({"action": "speak"}),
+                ),
+            ],
+            signature: None,
+            signature_key_id: None,
+            trace_level: Some("generic".into()),
+            trace_schema_version: "3.0.0".into(),
+            deployment_profile: Some(serde_json::json!({
+                "agent_role": "ally",
+                "agent_template": "ally-default",
+                "deployment_domain": "general",
+                "deployment_type": "production",
+                "deployment_region": null,
+                "deployment_trust_mode": "sovereign",
+            })),
+        }
+    }
+
+    fn provenance_300() -> BatchProvenance {
+        BatchProvenance {
+            batch_timestamp: "2026-06-08T00:00:05+00:00".into(),
+            consent_timestamp: "2026-04-01T00:00:00+00:00".into(),
+            trace_level: "generic".into(),
+            trace_schema_version: "3.0.0".into(),
+            correlation_metadata: None,
+        }
+    }
+
+    /// THE 3.0.0 / JCS wire proof (CIRISLensCore#43.2):
+    ///
+    /// A trace stamped `"3.0.0"` that lens-core seals + JCS-signs + wraps
+    /// must round-trip through persist's `BatchEnvelope::from_json` AND
+    /// verify under persist's `verify_trace` with `JcsCanonicalizer`.
+    ///
+    /// This proves the sign/verify JCS match: `canonical_bytes` dispatched
+    /// to JCS (V2Jcs via `canon_version_for_trace_schema("3.0.0")`), and
+    /// `verify_trace` — which uses the CALLER-SUPPLIED canonicalizer to
+    /// canonicalize the already-dispatched canonical value — verifies
+    /// correctly when given `JcsCanonicalizer`.
+    #[test]
+    fn batch_300_parses_and_verifies_through_real_persist_jcs() {
+        use ciris_persist::prelude::LocalSigner;
+        use ciris_persist::schema::{BatchEnvelope, BatchEvent};
+        use ciris_persist::verify::canonical::JcsCanonicalizer;
+        use ciris_persist::verify::verify_trace;
+        use ed25519_dalek::SigningKey;
+
+        let sk = SigningKey::from_bytes(&[43u8; 32]);
+        let vk = sk.verifying_key();
+        let signer = LocalSigner::from_parts(sk, "jcs-host-key".into(), None, None);
+
+        let mut trace = sealed_300_trace();
+        seal::sign_trace(&signer, &mut trace).expect("sign 3.0.0");
+
+        let bytes = build_batch_bytes(&[trace], &provenance_300()).expect("build 3.0.0 batch");
+
+        // persist's real typed deserializer — 3.0.0 is in SUPPORTED_VERSIONS;
+        // deployment_profile is NOT required at 3.0.0 (but present here).
+        let env = BatchEnvelope::from_json(&bytes)
+            .expect("persist must parse a lens-core-built 3.0.0 batch");
+        assert_eq!(env.events.len(), 1);
+
+        let BatchEvent::CompleteTrace { trace: ptrace, .. } = &env.events[0];
+        // verify_trace dispatches field layout by schema version ("3.0.0" →
+        // canonical_payload_value_v279), then calls the supplied canonicalizer
+        // on the value. We supply JcsCanonicalizer to match the signing path.
+        verify_trace(ptrace, &JcsCanonicalizer, &vk)
+            .expect("persist verify_trace must accept a 3.0.0 JCS-signed lens-core trace");
+    }
+
+    /// Negative control for the 3.0.0 / JCS path (CIRISLensCore#43.2):
+    ///
+    /// A `"3.0.0"` trace JCS-signed by lens-core MUST FAIL `verify_trace`
+    /// when the caller passes `PythonJsonDumpsCanonicalizer` (the old path).
+    /// This proves the dispatch matters: the two canonicalizers produce
+    /// different bytes on the canonical value, so the wrong one causes a
+    /// `SignatureMismatch`. For a pure-ASCII trace the two canonicalizers
+    /// agree — so we include a non-ASCII character in the data to guarantee
+    /// divergence (the CIRISAgent#871 measured corpus: any non-Latin text
+    /// or the ⚠️ emoji).
+    #[test]
+    fn batch_300_jcs_signed_fails_with_python_canonicalizer() {
+        use ciris_persist::prelude::{LocalSigner, PythonJsonDumpsCanonicalizer};
+        use ciris_persist::schema::{BatchEnvelope, BatchEvent};
+        use ciris_persist::verify::verify_trace;
+        use ed25519_dalek::SigningKey;
+
+        let sk = SigningKey::from_bytes(&[44u8; 32]);
+        let vk = sk.verifying_key();
+        let signer = LocalSigner::from_parts(sk, "jcs-neg-key".into(), None, None);
+
+        // Non-ASCII in the data — triggers Python-vs-JCS divergence
+        // (Python emits \\u26a0, JCS emits raw ⚠ UTF-8 bytes).
+        let mut trace = sealed_300_trace();
+        trace.components[0].data = serde_json::json!({"note": "⚠️ attestation"});
+        seal::sign_trace(&signer, &mut trace).expect("sign 3.0.0");
+
+        let bytes = build_batch_bytes(&[trace], &provenance_300()).expect("build batch");
+        let env = BatchEnvelope::from_json(&bytes).expect("parses (shape valid)");
+        let BatchEvent::CompleteTrace { trace: ptrace, .. } = &env.events[0];
+
+        // 3.0.0 JCS-signed trace MUST NOT verify under PythonJsonDumps.
+        assert!(
+            verify_trace(ptrace, &PythonJsonDumpsCanonicalizer, &vk).is_err(),
+            "3.0.0 JCS-signed trace must fail verify under PythonJsonDumpsCanonicalizer \
+             (the dispatch mismatch mints invalid signatures on non-ASCII — CIRISAgent#871 trap)"
+        );
+    }
 }

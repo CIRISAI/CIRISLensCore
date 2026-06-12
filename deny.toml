@@ -88,6 +88,19 @@ ignore = [
     "RUSTSEC-2025-0090",
     "RUSTSEC-2025-0098",
     "RUSTSEC-2025-0100",
+
+    # pyo3 0.28.3 — both fixed in pyo3 0.29.0. The CIRIS family is pinned
+    # to pyo3 0.28 (edge + persist + lens-core); a unilateral 0.29 bump
+    # would put two pyo3 versions / abi3 runtimes in the cohabitation
+    # graph. The 0.28→0.29 upgrade is a coordinated family lockstep move
+    # (CIRISEdge#89, v2.2.0 target); these auto-disappear then. Neither is
+    # reachable on lens-core's path — 0176 is unsafe nth/nth_back on
+    # PyList/PyTuple iterators (lens-core never offset-indexes Python
+    # sequences); 0177 is a missing Sync bound on PyCFunction::new_closure
+    # (lens-core registers no closure pyfunctions, only #[pyfunction]/
+    # #[pymethods]).
+    "RUSTSEC-2026-0176",
+    "RUSTSEC-2026-0177",
 ]
 
 [sources]

@@ -1,6 +1,6 @@
 [package]
 name = "ciris-lens-core"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "Science-layer runtime for the CIRIS federation: cohort-routes, scores manifold conformity, signs detection events"
 license = "AGPL-3.0-or-later"
@@ -25,8 +25,8 @@ crate-type = ["cdylib", "rlib"]
 #
 # OQ-01 closure 2026-05-03: rlib primary, PyO3 cdylib via `python`
 # feature for the deployed-lens cutover.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v5.2.0", version = "5", features = ["extract", "sqlite"] }
-ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v2.0.1", version = "2", features = ["transport-http"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v5.5.2", version = "5", features = ["extract", "sqlite"] }
+ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v2.1.1", version = "2", features = ["transport-http"] }
 
 # Keyring — relay mode (CIRISLensCore#10) loads its Edge transport-
 # signing identity via `ciris_keyring::load_local_seed`. Edge's
@@ -86,6 +86,17 @@ thiserror = "1.0"
 # `#[async_trait]` `Handler<AccordEventsBatch>`; the impl must use the
 # same macro the trait declares it with.
 async-trait = "0.1"
+
+# Windows: selectively bundle OpenSSL (CIRISLensCore#43.3). `openssl-sys`
+# arrives transitively via edge's `transport-http`; the windows-latest
+# runner has no system OpenSSL, so the build fails. Enabling
+# `openssl/vendored` ONLY on windows (target-cfg) unifies the
+# `openssl-sys/vendored` feature for that target — OpenSSL is compiled
+# from source (openssl-src) and statically linked into the cdylib. No
+# effect on linux/macos (system OpenSSL, as today). Build needs nasm +
+# perl on the runner — see the `pyo3-wheel-windows` CI job.
+[target.'cfg(windows)'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 proptest = "1.4"

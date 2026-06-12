@@ -36,12 +36,13 @@ pub mod consent;
 pub mod correlation;
 pub mod event;
 pub mod partial;
+pub mod py_engine;
 pub mod seal;
 
 pub use batch::{build_batch_bytes, BatchBuildError, BatchProvenance};
 pub use client::{
-    sign_trace_via_hardware_signer, CaptureClient, CaptureEventOutcome, ClientError, SealSignError,
-    SealSummary,
+    sign_trace_via_hardware_signer, CaptureClient, CaptureEventOutcome, ClientError,
+    PrepareSealOutcome, SealSignError, SealSummary,
 };
 pub use consent::{
     resolve_consent, resolve_consent_via_engine, resolve_grant, ConsentConfig, ConsentError,

@@ -1,5 +1,16 @@
 # CIRISLensCore Release Notes
 
+# v1.0.1 — agent-fold patch (cross-wheel Engine + JCS/3.0.0 + release artifacts)
+
+**2026-06-11** — Patch from the CIRISAgent 2.9.6 fold (CIRISLensCore#43). Substrate floor: **persist 5.5.2 + edge 2.1.1 + verify 5.1.0** (the floor that carries the Windows port).
+
+- **#43.1 (P0)** — `LensClient` now takes an `engine=` kwarg (the host `ciris_persist.Engine`) and signs/persists through its **Python methods** (`local_sign` / `receive_and_persist`), fixing the pip-cohabitation `RuntimeError: no process Engine` (the per-wheel `current_rust_engine()` static can't be shared across cdylibs). `engine=None` keeps the rlib-fold path. Unblocks the agent fold.
+- **#43.2** — JCS gate crossing: `TRACE_SCHEMA_VERSION` "2.7.9"→"3.0.0" and `canonical_bytes` dispatches the canonicalizer by schema version through persist's own `canon_version_for_trace_schema` (JCS for major ≥3, PythonJsonDumps for 2.7.x) — sign-side byte-identical to the verifier by construction.
+- **#43.3** — ships the sibling release-artifact set on tag (GitHub Release: iOS/android tarballs + Chaquopy wheels + Windows wheel + `SHA256SUMS`) + a **Windows PyPI wheel**. The Windows wheel is real now that the upstream wall is gone: persist 5.5.2 (Unix paths cfg-gated, #200) + leviculum's `reticulum-std` Windows port + edge 2.1.1 (CIRISEdge#87). lens-core bundles OpenSSL on Windows (`target.'cfg(windows)'` `openssl/vendored` + nasm/Strawberry-Perl in CI).
+- **Relaxed pin** — `ciris-persist==5.2.0` → `>=5.2.0,<6` (the v1.0.0 exact pin blocked persist currency; cohabitation is now name-based Python dispatch, version-tolerant). Cargo links bumped to persist 5.5.2 + edge 2.1.1.
+
+#43.4 (canonical community key) tracked as a CIRISRegistry decision. Edge's side of the cohabitation handshake: CIRISEdge#85.
+
 # v1.0.0 — wire-contract freeze + CIRISLensCore#11 client-emit surface
 
 **2026-06-11** — The v1.0 milestone. Two things land together:
