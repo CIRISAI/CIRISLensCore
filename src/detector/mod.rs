@@ -38,11 +38,13 @@
 
 use ciris_persist::pipeline::extract::Features;
 
+pub mod axis_metrics;
 pub mod coherence_ratchet;
 pub mod correlated_action;
 pub mod distributive_access;
 pub mod manifold;
 
+pub use axis_metrics::{axis_score, score_against_axis, AxisScore};
 pub use coherence_ratchet::CoherenceRatchetDetector;
 pub use correlated_action::{CorrelatedActionAxis, CorrelatedActionInput};
 pub use distributive_access::{DistributiveAccessInput, DistributiveAccessResource};

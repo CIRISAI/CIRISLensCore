@@ -73,8 +73,15 @@ Engine, lens-core sub-module is unchanged).
   ``ciris_persist::pipeline::scrub::scrub_traces_batch``.
 - ``ner_is_configured() -> bool`` — delegates to
   ``ciris_persist::pipeline::scrub::ner::is_configured``.
-- ``PROJECTION_VERSION: str`` — currently ``"crc-v1"``; bumps to
-  ``"crc-v2"`` post-RATCHET calibration (CIRISLensCore#3).
+- ``PROJECTION_VERSION: str`` — ``"crc-v1"``; the **manifold**
+  (§5.5.1) 16-field projection contract. Unchanged by crc-v2 — the
+  manifold projection did not change; only the F-3 + distributive
+  axis-family axes were calibrated.
+- ``AXIS_CALIBRATION_VERSION: str`` — ``"crc-v2"``; the **axis-family**
+  (§5.5.3 F-3 + §5.5.5 distributive) calibration the live detectors
+  consume. Versioned independently of ``PROJECTION_VERSION``.
+- ``RATCHET_AXIS_CALIBRATION_VERSION: int`` — ``2``; the integer stamp
+  copied into ``detection:*`` envelopes' ``ratchet_calibration_version``.
 - ``__version__: str`` — top-level package version (Python-stdlib
   convention). Added in v0.2.2; v0.2.0 + v0.2.1 omitted this.
 
@@ -91,7 +98,9 @@ lens deletes the obsolete call sites at swap time.
 """
 
 from .ciris_lens_core import (  # type: ignore[attr-defined]
+    AXIS_CALIBRATION_VERSION,
     PROJECTION_VERSION,
+    RATCHET_AXIS_CALIBRATION_VERSION,
     LensClient,
     install_relay,
     ner_is_configured,
@@ -103,7 +112,9 @@ from .ciris_lens_core import (  # type: ignore[attr-defined]
 __version__ = "1.2.0"
 
 __all__ = [
+    "AXIS_CALIBRATION_VERSION",
     "PROJECTION_VERSION",
+    "RATCHET_AXIS_CALIBRATION_VERSION",
     "LensClient",
     "__version__",
     "install_relay",

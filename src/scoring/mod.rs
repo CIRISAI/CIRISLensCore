@@ -3,12 +3,17 @@
 //! See MISSION.md §2 scoring/.
 
 pub mod assembly;
+pub mod axis_calibration;
 pub mod calibration;
 pub mod capacity;
 pub mod n_eff;
 pub mod result;
 
 pub use assembly::{assemble, AssemblyInput};
+pub use axis_calibration::{
+    AxisCalibration, AxisCalibrationError, AxisEntry, CalibrationOutcome, Polarity,
+    ThresholdFunction, AXIS_CALIBRATION_VERSION, RATCHET_AXIS_CALIBRATION_VERSION,
+};
 pub use calibration::{
     BundleError, CalibrationBundle, CohortCentroid, Projection, Standardization,
 };
