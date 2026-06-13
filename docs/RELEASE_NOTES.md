@@ -1,5 +1,9 @@
 # CIRISLensCore Release Notes
 
+# v1.4.2 — RetRelay.transport_identity_pubkeys() — edge-parity proper key handle
+
+**2026-06-12** — Adds `RetRelay.transport_identity_pubkeys() -> dict`, mirroring edge v2.2.2's `PyEdge.transport_identity_pubkeys()` proper handle byte-for-byte (`{"x25519_pub_base64": ..., "ed25519_pub_base64": ...}`, 32 raw bytes each, STANDARD base64). Deployed code now uses one idiom for the transport-identity keys whether it reads from a `PyEdge` or a `RetRelay`. The scalar `transport_x25519_pubkey_b64()` / `transport_ed25519_pubkey_b64()` accessors stay (they feed persist's positional `local_identity_aggregate(...)`). No behavioral change — the dict carries the exact same values 1.4.1 already produced. Substrate floor unchanged (persist 5.5.5 / edge 2.2.2 / verify 5.1.3).
+
 # v1.4.1 — surface the reticulum address (RNS dest hash) on RetRelay (edge v2.2.2)
 
 **2026-06-12** — Completes the RET-address record. v1.4.0 exposed the transport pubkeys (the aggregate-ID inputs); the dialable **RNS destination hash** — the address peers actually resolve — is RNS-internal (`*dest.hash()` over identity + app aspects, not derivable from the pubkey). Edge v2.2.2 (CIRISEdge#97) added the accessor, so lens-core can now surface it. Substrate floor: persist 5.5.5 / **edge 2.2.2** / verify 5.1.3.

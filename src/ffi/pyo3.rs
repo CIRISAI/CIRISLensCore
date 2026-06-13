@@ -1730,8 +1730,35 @@ struct PyRetRelay {
 
 #[pymethods]
 impl PyRetRelay {
+    /// The transport-identity public keys as a `dict`, matching edge's
+    /// `PyEdge.transport_identity_pubkeys()` proper handle byte-for-byte
+    /// (edge v2.2.2) so deployed code uses one idiom whether it reads
+    /// from a `PyEdge` or this `RetRelay`:
+    ///
+    /// ```python
+    /// relay.transport_identity_pubkeys() == {
+    ///     "x25519_pub_base64":  "...",  # 32 raw bytes, base64 standard
+    ///     "ed25519_pub_base64": "...",  # 32 raw bytes, base64 standard
+    /// }
+    /// ```
+    ///
+    /// Persist's `LocalIdentityAggregate` builder reads these to populate
+    /// the RET-transport role. (The dialable RNS destination is separate —
+    /// see [`Self::reticulum_dest_hash_hex`].)
+    fn transport_identity_pubkeys<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        let dict = pyo3::types::PyDict::new(py);
+        dict.set_item("x25519_pub_base64", &self.x25519_b64)?;
+        dict.set_item("ed25519_pub_base64", &self.ed25519_b64)?;
+        Ok(dict)
+    }
+
     /// Base64 x25519 (encryption) transport pubkey — the
     /// `reticulum_x25519_pubkey_b64` input to `local_identity_aggregate`.
+    /// Convenience scalar; `transport_identity_pubkeys()` is the
+    /// edge-parity handle.
     fn transport_x25519_pubkey_b64(&self) -> &str {
         &self.x25519_b64
     }
