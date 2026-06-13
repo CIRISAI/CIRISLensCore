@@ -1,5 +1,13 @@
 # CIRISLensCore Release Notes
 
+# v1.4.1 — surface the reticulum address (RNS dest hash) on RetRelay (edge v2.2.2)
+
+**2026-06-12** — Completes the RET-address record. v1.4.0 exposed the transport pubkeys (the aggregate-ID inputs); the dialable **RNS destination hash** — the address peers actually resolve — is RNS-internal (`*dest.hash()` over identity + app aspects, not derivable from the pubkey). Edge v2.2.2 (CIRISEdge#97) added the accessor, so lens-core can now surface it. Substrate floor: persist 5.5.5 / **edge 2.2.2** / verify 5.1.3.
+
+- **Cargo edge pin v2.2.1 → v2.2.2** (adds `Edge::local_dest_hash() -> Option<[u8; 16]>`).
+- **`ret_relay` captures `edge.local_dest_hash()`** before the Edge moves into the run-spawn; `RetRelayHandle` gains `reticulum_dest_hash() -> Option<[u8; 16]>` + `reticulum_dest_hash_hex() -> Option<String>` (canonical 32-char lowercase hex).
+- **`RetRelay.reticulum_dest_hash_hex()`** (PyO3) — the dialable reticulum address, alongside the existing `transport_x25519_pubkey_b64()` / `transport_ed25519_pubkey_b64()`. `RetRelay` is now the complete public address record: transport pubkeys (for persist's `local_identity_aggregate` #199) **plus** the RNS destination peers dial.
+
 # v1.4.0 — PyO3 RET-native relay: bring up the Reticulum transport from Python
 
 **2026-06-12** — Adds `install_ret_relay(...)`, the Python entry that brings up lens-core's Reticulum transport (previously rlib-only via `LensCore::ret_relay`). A deployed lens running under Python can now become RET-addressable instead of HTTP-relay-only. Substrate floor unchanged (persist 5.5.5 / edge 2.2.1 / verify 5.1.3). Folds in everything through 1.3.1 (crc-v2 + the concern_direction alignment).

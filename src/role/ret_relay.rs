@@ -187,6 +187,15 @@ impl LensCore {
         edge.register_handler::<AccordEventsBatch, _>(LensCoreHandler::new(engine))
             .await?;
 
+        // Capture the announced RNS destination hash — the dialable
+        // reticulum address peers resolve — BEFORE `edge` moves into the
+        // run-spawn. `Edge::local_dest_hash` (edge v2.2.2, CIRISEdge#97)
+        // returns the canonical `*dest.hash()` computed at
+        // `Destination::register` time; `Some` because we just wired a
+        // Reticulum transport. This is NOT re-derivable from the transport
+        // pubkey (RNS hashes over identity + app aspects), so edge owns it.
+        let local_dest_hash = edge.local_dest_hash();
+
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let join = tokio::spawn(async move { edge.run(shutdown_rx).await });
 
@@ -195,6 +204,7 @@ impl LensCore {
             join,
             ret_listen_addr,
             transport_pubkey,
+            local_dest_hash,
         })
     }
 }
@@ -208,6 +218,7 @@ pub struct RetRelayHandle {
     join: JoinHandle<Result<(), EdgeError>>,
     ret_listen_addr: SocketAddr,
     transport_pubkey: [u8; 64],
+    local_dest_hash: Option<[u8; 16]>,
 }
 
 impl RetRelayHandle {
@@ -215,6 +226,21 @@ impl RetRelayHandle {
     /// is bound to.
     pub fn ret_listen_addr(&self) -> SocketAddr {
         self.ret_listen_addr
+    }
+
+    /// The announced RNS destination hash — the dialable reticulum
+    /// address peers resolve this relay at (edge v2.2.2, CIRISEdge#97).
+    /// `Some` for a live RET relay; `None` only if no Reticulum transport
+    /// was wired (not reachable through this constructor).
+    pub fn reticulum_dest_hash(&self) -> Option<[u8; 16]> {
+        self.local_dest_hash
+    }
+
+    /// The reticulum address as canonical RNS lowercase hex (32 chars),
+    /// or `None` if unset. This is the address record a deployed lens
+    /// publishes for peers to dial.
+    pub fn reticulum_dest_hash_hex(&self) -> Option<String> {
+        self.local_dest_hash.map(hex::encode)
     }
 
     /// The generated transport-tier Reticulum dual-key public material:
@@ -286,16 +312,24 @@ mod tests {
         for (i, b) in pubkey.iter_mut().enumerate() {
             *b = i as u8;
         }
+        let dest = [0xABu8; 16];
         let rh = RetRelayHandle {
             shutdown_tx: tx,
             join: handle,
             ret_listen_addr: addr,
             transport_pubkey: pubkey,
+            local_dest_hash: Some(dest),
         };
         assert_eq!(rh.ret_listen_addr(), addr);
         // The two halves split at byte 32 (x25519 || ed25519).
         assert_eq!(rh.transport_x25519_pubkey(), pubkey[..32]);
         assert_eq!(rh.transport_ed25519_pubkey(), pubkey[32..]);
         assert_eq!(rh.transport_pubkey(), pubkey);
+        // RNS dest hash → canonical 32-char lowercase hex.
+        assert_eq!(rh.reticulum_dest_hash(), Some(dest));
+        assert_eq!(
+            rh.reticulum_dest_hash_hex().as_deref(),
+            Some("abababababababababababababababab")
+        );
     }
 }

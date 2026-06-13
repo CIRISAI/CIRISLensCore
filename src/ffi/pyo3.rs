@@ -1703,12 +1703,16 @@ fn install_ret_relay(
     let x25519_b64 = b64.encode(relay.transport_x25519_pubkey());
     let ed25519_b64 = b64.encode(relay.transport_ed25519_pubkey());
     let listen_str = relay.ret_listen_addr().to_string();
+    // The dialable RNS address (edge v2.2.2 / CIRISEdge#97) — canonical
+    // lowercase hex, captured now so it survives `shutdown()`.
+    let dest_hash_hex = relay.reticulum_dest_hash_hex();
 
     Ok(PyRetRelay {
         inner: std::sync::Arc::new(tokio::sync::Mutex::new(Some(relay))),
         x25519_b64,
         ed25519_b64,
         listen_addr: listen_str,
+        dest_hash_hex,
     })
 }
 
@@ -1721,6 +1725,7 @@ struct PyRetRelay {
     x25519_b64: String,
     ed25519_b64: String,
     listen_addr: String,
+    dest_hash_hex: Option<String>,
 }
 
 #[pymethods]
@@ -1735,6 +1740,13 @@ impl PyRetRelay {
     /// `reticulum_ed25519_pubkey_b64` input to `local_identity_aggregate`.
     fn transport_ed25519_pubkey_b64(&self) -> &str {
         &self.ed25519_b64
+    }
+
+    /// The dialable reticulum address — the announced RNS destination
+    /// hash as canonical lowercase hex (edge v2.2.2 / CIRISEdge#97).
+    /// This is the address peers resolve to reach this lens.
+    fn reticulum_dest_hash_hex(&self) -> Option<&str> {
+        self.dest_hash_hex.as_deref()
     }
 
     /// The TCP socket the Reticulum TCP-server interface is bound to.
