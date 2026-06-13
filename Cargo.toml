@@ -116,6 +116,16 @@ time = ">=0.3, <0.3.48"
 # and CI points openssl-sys at prebuilt vcpkg static libs instead. Mirror
 # of CIRISEdge v2.2.1 / CIRISPersist v5.5.5.
 
+# Strip symbols + debuginfo from all release artifacts (CIRISLensCore#52).
+# The release cdylib is ~44 MB unstripped (statically bundles persist +
+# edge + verify + reticulum + openssl); `strip = "symbols"` cuts it to a
+# fraction of that. maturin's `--strip` only touched the wheel copy — the
+# iOS `.so` (direct `cargo build`, no maturin) + the rlib shipped with
+# full symbols. This one line strips EVERY release artifact uniformly.
+# Split-debug forensic symbols, if ever wanted, go to the GitHub Release.
+[profile.release]
+strip = "symbols"
+
 [dev-dependencies]
 proptest = "1.4"
 criterion = "0.5"
