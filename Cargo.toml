@@ -46,7 +46,11 @@ ciris-keyring = { git = "https://github.com/CIRISAI/CIRISVerify", tag = "v5.2.0"
 # lens-core consumes pure-Rust (post-fold). Pin matches persist +
 # edge (0.28 + abi3-py311) for federation single-version discipline
 # and produces the cp311-abi3 wheel maturin expects.
-pyo3 = { version = "0.29", features = ["extension-module", "abi3-py310"], optional = true }
+# `extension-module` is gated behind the `python` feature (below), NOT pinned
+# here — otherwise feature-unification would force libpython-no-link onto any
+# consumer that links lens-core as an rlib in a *binary* (e.g. CIRISServer's
+# `ciris-server` bin). The wheel build turns it on via `python`.
+pyo3 = { version = "0.29", features = ["abi3-py310"], optional = true }
 
 # Serde + canonicalization
 serde = { version = "1.0", features = ["derive"] }
@@ -142,7 +146,7 @@ default = []
 # cohabitation accessors lens-core needs — `ciris_edge::ffi::pyo3::
 # PyEdge` (for the shared `Arc<Edge>`) + `ciris_persist::ffi::pyo3::
 # current_rust_engine` (CIRISPersist#92, v1.13.0+) — are visible.
-python = ["pyo3", "ciris-edge/pyo3", "ciris-persist/pyo3"]
+python = ["pyo3", "pyo3/extension-module", "ciris-edge/pyo3", "ciris-persist/pyo3"]
 
 # Benches — criterion suite per docs/BENCHMARKS.md. Mirrors persist
 # + edge bench patterns. `harness = false` because criterion supplies

@@ -1810,8 +1810,15 @@ impl PyRetRelay {
 /// plus the v0.2 cohabitation bootstrap (`install_relay`), the v0.3
 /// audit client (`LensAudit`, CIRISLensCore#12), the v0.4 egress
 /// filter (#14), and the v0.4 node-mode read API (#15).
-#[pymodule]
-fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+/// Mount lens-core's full Python surface onto a host-provided module.
+///
+/// Lets another wheel re-expose lens-core's classes/functions (`LensClient`
+/// et al.) without lens-core being the entry-point `#[pymodule]` — e.g.
+/// CIRISServer's `ciris_server` wheel calls this so CIRISAgent can
+/// `from ciris_server import LensClient` (a drop-in for `ciris_lens_core`).
+/// This is the single source of truth for the registration list; the
+/// `ciris_lens_core` `#[pymodule]` below just delegates to it.
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(process_trace_batch, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_trace, m)?)?;
     m.add_function(wrap_pyfunction!(scrub_traces_batch, m)?)?;
@@ -1849,4 +1856,9 @@ fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         crate::scoring::axis_calibration::RATCHET_AXIS_CALIBRATION_VERSION,
     )?;
     Ok(())
+}
+
+#[pymodule]
+fn ciris_lens_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    register(m)
 }
