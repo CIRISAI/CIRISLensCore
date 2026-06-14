@@ -25,7 +25,7 @@ crate-type = ["cdylib", "rlib"]
 #
 # OQ-01 closure 2026-05-03: rlib primary, PyO3 cdylib via `python`
 # feature for the deployed-lens cutover.
-ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.5.0", version = "6", features = ["extract", "sqlite"] }
+ciris-persist = { git = "https://github.com/CIRISAI/CIRISPersist", tag = "v6.6.0", version = "6", features = ["extract", "sqlite"] }
 ciris-edge    = { git = "https://github.com/CIRISAI/CIRISEdge",    tag = "v3.2.0", version = "3", features = ["transport-http", "transport-reticulum"] }
 
 # Keyring — relay mode (CIRISLensCore#10) loads its Edge transport-
