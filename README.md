@@ -1,3 +1,15 @@
+> # ⚠️ SUPERSEDED BY CIRISSERVER
+>
+> **This repository is archived and is no longer the source of truth.** `ciris-lens-core`
+> has been absorbed into **[CIRISServer](https://github.com/CIRISAI/CIRISServer)** as the
+> in-tree workspace crate **`crates/ciris-lens-core`** — which is what actually builds and
+> ships (CIRISServer pins it by `path`, not git). CIRISServer is the only consumer.
+>
+> All development, issues, and releases happen in CIRISServer. Do not open PRs or rely on
+> tags here. → **https://github.com/CIRISAI/CIRISServer**
+
+---
+
 # `ciris-lens-core`
 
 The science-layer Rust crate for the CIRIS federation. Routes traces
