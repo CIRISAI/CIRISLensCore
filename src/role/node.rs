@@ -642,36 +642,92 @@ pub(crate) fn build_read_router(state: NodeState) -> Router {
 /// for an orderly stop.
 pub struct NodeHandle {
     relay: crate::role::relay::RelayHandle,
+    read: ReadApiHandle,
+}
+
+impl NodeHandle {
+    /// The socket address the node's HTTP read-API listener is bound to.
+    pub fn listen_addr(&self) -> SocketAddr {
+        self.read.listen_addr()
+    }
+
+    /// Signal both the Edge relay and the HTTP read API to stop, and await both.
+    ///
+    /// Consumes the handle. Returns the first error encountered (relay
+    /// shutdown takes priority in error reporting).
+    pub async fn shutdown(self) -> Result<(), NodeError> {
+        self.read.shutdown().await?;
+        self.relay.shutdown().await.map_err(NodeError::Relay)
+    }
+}
+
+/// Handle to a running read-API HTTP server (the frozen `GET /lens/api/v1/*`).
+///
+/// Dropping the handle does **not** stop the server — call
+/// [`shutdown`](Self::shutdown) for an orderly stop.
+pub struct ReadApiHandle {
     http_shutdown_tx: watch::Sender<bool>,
     http_join: JoinHandle<()>,
     listen_addr: SocketAddr,
 }
 
-impl NodeHandle {
-    /// The socket address the node's HTTP listener is bound to.
+impl ReadApiHandle {
+    /// The socket address the read-API HTTP listener is bound to.
     pub fn listen_addr(&self) -> SocketAddr {
         self.listen_addr
     }
 
-    /// Signal both the Edge relay and the HTTP server to stop, and
-    /// await both.
-    ///
-    /// Consumes the handle. Returns the first error encountered (relay
-    /// shutdown takes priority in error reporting).
+    /// Signal the read-API server to stop and await its task.
     pub async fn shutdown(self) -> Result<(), NodeError> {
-        // Signal the HTTP server to stop.
         let _ = self.http_shutdown_tx.send(true);
-        // Await the HTTP task.
         let _ = self.http_join.await;
-
-        // Shut down the relay.
-        self.relay.shutdown().await.map_err(NodeError::Relay)
+        Ok(())
     }
 }
 
 // ─── LensCore::node ────────────────────────────────────────────────
 
 impl LensCore {
+    /// Start ONLY the frozen read API (`GET /lens/api/v1/*`) over the host
+    /// `Engine` — **Edge-independent**. A host that orchestrates its own shared
+    /// Edge (one per process — the fabric-node model) pairs this with
+    /// [`LensCore::attach_handler`] (ingest) to run lens-core over that ONE
+    /// host-owned Edge, instead of [`LensCore::node`] building a second Edge.
+    pub async fn read_api(
+        engine: Arc<Engine>,
+        listen_addr: SocketAddr,
+        peer_acl: PeerAcl,
+        scoring: ScoringConfig,
+        ux: UxConfig,
+    ) -> Result<ReadApiHandle, NodeError> {
+        let state = NodeState {
+            engine: Some(engine),
+            peer_acl: Arc::new(peer_acl),
+            ratchet_version: scoring.ratchet_calibration_version,
+            api_root: ux.api_root.clone(),
+        };
+        let router = build_read_router(state);
+        let (http_shutdown_tx, mut http_shutdown_rx) = watch::channel(false);
+        let http_join = tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(listen_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(%e, %listen_addr, "lens read API listener bind failed");
+                    return;
+                }
+            };
+            tracing::info!(%listen_addr, "lens read API listening");
+            axum::serve(listener, router)
+                .with_graceful_shutdown(async move {
+                    let _ = http_shutdown_rx.changed().await;
+                })
+                .await
+                .ok();
+            tracing::info!(%listen_addr, "lens read API stopped");
+        });
+        Ok(ReadApiHandle { http_shutdown_tx, http_join, listen_addr })
+    }
+
     /// Start lens-core in **node mode** — relay + UX read API.
     ///
     /// Builds the full relay (via [`LensCore::relay`]) AND spawns an
@@ -740,41 +796,11 @@ impl LensCore {
             .await
             .map_err(NodeError::Relay)?;
 
-        // Build the axum HTTP server for the read API.
-        let state = NodeState {
-            engine: Some(Arc::clone(&engine)),
-            peer_acl: Arc::new(peer_acl),
-            ratchet_version: scoring.ratchet_calibration_version,
-            api_root: ux.api_root.clone(),
-        };
+        // Read API (frozen GET /lens/api/v1/*) — the same Edge-independent path
+        // a host with its own shared Edge uses via LensCore::read_api.
+        let read = LensCore::read_api(engine, listen_addr, peer_acl, scoring, ux).await?;
 
-        let router = build_read_router(state);
-
-        let (http_shutdown_tx, mut http_shutdown_rx) = watch::channel(false);
-        let http_join = tokio::spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(listen_addr).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!(%e, %listen_addr, "node HTTP listener bind failed");
-                    return;
-                }
-            };
-            tracing::info!(%listen_addr, "node read API listening");
-            axum::serve(listener, router)
-                .with_graceful_shutdown(async move {
-                    let _ = http_shutdown_rx.changed().await;
-                })
-                .await
-                .ok();
-            tracing::info!(%listen_addr, "node read API stopped");
-        });
-
-        Ok(NodeHandle {
-            relay,
-            http_shutdown_tx,
-            http_join,
-            listen_addr,
-        })
+        Ok(NodeHandle { relay, read })
     }
 }
 

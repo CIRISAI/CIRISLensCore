@@ -72,7 +72,7 @@ classifiers = [
 # on the persist 5.x / pyo3 0.28 line (persist 6.0.0 is the separate pyo3
 # 0.29 lockstep). Mirrors edge v2.2.1's `>=5.5.5,<6` exactly.
 dependencies = [
-    "ciris-persist>=5.5.5,<6",
+    "ciris-persist>=6.5.0,<7",
 ]
 dynamic = ["version"]
 
